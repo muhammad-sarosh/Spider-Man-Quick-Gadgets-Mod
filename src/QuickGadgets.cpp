@@ -54,16 +54,11 @@ std::atomic_bool g_running = true;
 std::atomic_bool g_enabled = true;
 
 // Keep this marker independent of the C++ stream/CRT logging path. If the
-// loader calls script_enable(), this file should appear beside the DLL even
-// when Script Hook's console/stdout capture is unavailable.
-void WriteEntryMarker(const char* message) {
-    HMODULE module = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&WriteEntryMarker), &module)) {
-        return;
-    }
-
+// loader calls either DLL_PROCESS_ATTACH or script_enable(), a marker should
+// appear beside the DLL even when Script Hook's console/stdout capture is
+// unavailable.
+void WriteModuleMarker(HMODULE module, const char* message) {
+    if (!module) return;
     std::array<wchar_t, MAX_PATH> path{};
     const DWORD length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
     if (length == 0 || length >= path.size()) return;
@@ -82,6 +77,15 @@ void WriteEntryMarker(const char* message) {
     DWORD written = 0;
     WriteFile(file, message, static_cast<DWORD>(std::strlen(message)), &written, nullptr);
     CloseHandle(file);
+}
+
+void WriteEntryMarker(const char* message) {
+    HMODULE module = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&WriteEntryMarker), &module)) {
+        WriteModuleMarker(module, message);
+    }
 }
 
 std::wstring GetModuleDirectory() {
@@ -348,7 +352,8 @@ void Worker() {
 
 } // namespace
 
-BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_ATTACH) WriteModuleMarker(module, "DllMain process attach\r\n");
     if (reason == DLL_PROCESS_DETACH) g_running = false;
     return TRUE;
 }
