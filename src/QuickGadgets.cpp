@@ -9,6 +9,7 @@
 #include <cstring>
 #include <fstream>
 #include <mutex>
+#include <new>
 #include <string>
 #include <thread>
 
@@ -187,6 +188,90 @@ NativeApi g_native;
 std::atomic_bool g_probeFinished = false;
 std::atomic_bool g_probeLoggedHero = false;
 
+// The equip manager's public component name is known, but its native method
+// names are not exported by Script Hook. For one diagnostic run we clone the
+// live instance vtable and wrap only the methods that are plausible loadout
+// operations. The wrappers forward the original call unchanged and log the
+// first few register arguments. This lets us observe the game's own wheel
+// path without synthesising keyboard/controller input.
+using TraceMethodFn = std::uintptr_t (*)(void*, void*, void*, void*);
+
+struct EquipTraceState {
+    void*** objectVtable = nullptr;
+    void** originalVtable = nullptr;
+    void** clonedVtable = nullptr;
+    TraceMethodFn originals[32]{};
+    std::atomic_uint32_t calls[32]{};
+    bool installed = false;
+};
+
+EquipTraceState g_equipTrace;
+
+std::uintptr_t TraceEquipCall(int slot, void* self, void* rdx, void* r8, void* r9) {
+    if (slot >= 0 && slot < 32) {
+        const auto count = g_equipTrace.calls[slot].fetch_add(1);
+        if (count < 12) {
+            char line[256]{};
+            std::snprintf(line, sizeof(line),
+                          "SunsetEquipManager native call slot %d: this=%p rdx=%p r8=%p r9=%p",
+                          slot, self, rdx, r8, r9);
+            Log(line);
+        }
+        if (g_equipTrace.originals[slot]) {
+            return g_equipTrace.originals[slot](self, rdx, r8, r9);
+        }
+    }
+    return 0;
+}
+
+#define QUICK_GADGETS_TRACE_WRAPPER(n) \
+    std::uintptr_t TraceEquip##n(void* self, void* rdx, void* r8, void* r9) { \
+        return TraceEquipCall(n, self, rdx, r8, r9); \
+    }
+
+QUICK_GADGETS_TRACE_WRAPPER(13)
+QUICK_GADGETS_TRACE_WRAPPER(15)
+QUICK_GADGETS_TRACE_WRAPPER(19)
+QUICK_GADGETS_TRACE_WRAPPER(25)
+QUICK_GADGETS_TRACE_WRAPPER(26)
+QUICK_GADGETS_TRACE_WRAPPER(27)
+
+#undef QUICK_GADGETS_TRACE_WRAPPER
+
+void InstallEquipTrace(void* component) {
+    if (g_equipTrace.installed || !component) return;
+
+    auto*** objectVtable = reinterpret_cast<void***>(component);
+    if (!objectVtable || !*objectVtable) return;
+
+    auto** cloned = new (std::nothrow) void*[32];
+    if (!cloned) return;
+    std::memcpy(cloned, *objectVtable, sizeof(void*) * 32);
+
+    g_equipTrace.objectVtable = objectVtable;
+    g_equipTrace.originalVtable = *objectVtable;
+    g_equipTrace.clonedVtable = cloned;
+    constexpr int kSlots[] = {13, 15, 19, 25, 26, 27};
+    void* kWrappers[] = {
+        reinterpret_cast<void*>(&TraceEquip13),
+        reinterpret_cast<void*>(&TraceEquip15),
+        reinterpret_cast<void*>(&TraceEquip19),
+        reinterpret_cast<void*>(&TraceEquip25),
+        reinterpret_cast<void*>(&TraceEquip26),
+        reinterpret_cast<void*>(&TraceEquip27),
+    };
+    for (int i = 0; i < static_cast<int>(std::size(kSlots)); ++i) {
+        const int slot = kSlots[i];
+        g_equipTrace.originals[slot] =
+            reinterpret_cast<TraceMethodFn>(cloned[slot]);
+        cloned[slot] = kWrappers[i];
+    }
+
+    *objectVtable = cloned;
+    g_equipTrace.installed = true;
+    Log("Installed temporary SunsetEquipManager native call trace (slots 13,15,19,25,26,27)");
+}
+
 void ProbeComponentsOnGameThread() {
     if (!g_running || !g_native.getPlayerHero || !g_native.getComponentByName) return;
 
@@ -223,6 +308,10 @@ void ProbeComponentsOnGameThread() {
                               component,
                               *reinterpret_cast<void**>(component));
                 Log(componentLine);
+
+                if (name && std::strcmp(name, "SunsetEquipManager") == 0) {
+                    InstallEquipTrace(component);
+                }
 
                 const bool interesting = name &&
                     (std::strstr(name, "Gadget") ||
