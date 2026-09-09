@@ -36,6 +36,12 @@ hard-coded executable addresses.
    `QuickGadgets.ini` into the game’s `scripts` folder.
 4. Launch the game through the Script Hook/community loader.
 
+The current development build also runs a read-only native probe after the
+script loads. Once a save is loaded, its findings are printed in the Script
+Hook console with a `[QuickGadgets]` prefix. This confirms which live hero
+gadget components are available before we call any internal direct-fire
+routine; it does not change gameplay by itself.
+
 ## Configure
 
 Edit `QuickGadgets.ini` beside the script before launching the game. Values are
@@ -73,6 +79,11 @@ Input layout that emits keyboard keys instead:
 This is a keyboard translation layer, not native XInput interception. It keeps
 the original controller actions from leaking into combat while using the same
 tested DLL path.
+
+Native controller interception is still being investigated. The game has no
+user-facing Previous/Next Gadget buttons on a controller, so the eventual
+Spider-Man 2-style implementation must call the hero gadget component directly
+instead of relying on those keyboard actions.
 
 ## Build
 
