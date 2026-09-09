@@ -52,6 +52,7 @@ Config g_config;
 std::mutex g_configMutex;
 std::atomic_bool g_running = true;
 std::atomic_bool g_enabled = true;
+volatile LONG g_workerStarted = 0;
 
 // Keep this marker independent of the C++ stream/CRT logging path. If the
 // loader calls either DLL_PROCESS_ATTACH or script_enable(), a marker should
@@ -350,10 +351,35 @@ void Worker() {
     }
 }
 
+DWORD WINAPI WorkerBootstrap(LPVOID) {
+    // DllMain runs while the loader lock is held. Delay the actual C++ work
+    // until after the callback returns so configuration/CRT calls are safe.
+    Sleep(1500);
+    WriteEntryMarker("fallback worker running\r\n");
+    Worker();
+    return 0;
+}
+
+void StartWorker() {
+    if (InterlockedCompareExchange(&g_workerStarted, 1, 0) != 0) return;
+
+    HANDLE thread = CreateThread(nullptr, 0, &WorkerBootstrap, nullptr, 0, nullptr);
+    if (!thread) {
+        InterlockedExchange(&g_workerStarted, 0);
+        WriteEntryMarker("fallback CreateThread failed\r\n");
+        return;
+    }
+    CloseHandle(thread);
+}
+
 } // namespace
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_ATTACH) WriteModuleMarker(module, "DllMain process attach\r\n");
+    if (reason == DLL_PROCESS_ATTACH) {
+        WriteModuleMarker(module, "DllMain process attach\r\n");
+        DisableThreadLibraryCalls(module);
+        StartWorker();
+    }
     if (reason == DLL_PROCESS_DETACH) g_running = false;
     return TRUE;
 }
@@ -362,9 +388,5 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
 // script package. Keep the worker outside DllMain so the loader lock is never held.
 extern "C" __declspec(dllexport) void script_enable() {
     WriteEntryMarker("script_enable called\r\n");
-    static std::once_flag started;
-    std::call_once(started, [] {
-        WriteEntryMarker("worker started\r\n");
-        std::thread(Worker).detach();
-    });
+    StartWorker();
 }
