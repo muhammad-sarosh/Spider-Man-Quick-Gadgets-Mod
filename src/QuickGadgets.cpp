@@ -223,6 +223,24 @@ void ProbeComponentsOnGameThread() {
                               component,
                               *reinterpret_cast<void**>(component));
                 Log(componentLine);
+
+                const bool interesting = name &&
+                    (std::strstr(name, "Gadget") ||
+                     std::strstr(name, "Loadout") ||
+                     std::strstr(name, "Equip") ||
+                     std::strstr(name, "Inventory"));
+                if (interesting) {
+                    auto** vtable = reinterpret_cast<void***>(component);
+                    if (!vtable || !*vtable) continue;
+                    for (int slot = 0; slot < 32; ++slot) {
+                        void* function = (*vtable)[slot];
+                        if (!function) break;
+                        char vtableLine[160]{};
+                        std::snprintf(vtableLine, sizeof(vtableLine),
+                                      "  vtable[%02d] = %p", slot, function);
+                        Log(vtableLine);
+                    }
+                }
             }
         } else {
             Log("GetComponents returned an empty or invalid component vector");
