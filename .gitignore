@@ -1,0 +1,7 @@
+.reference/
+build/
+out/
+*.user
+*.pdb
+*.ilk
+
