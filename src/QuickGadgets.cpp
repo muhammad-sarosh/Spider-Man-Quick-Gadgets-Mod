@@ -359,16 +359,18 @@ bool Down(WORD key) {
 
 void Worker() {
     bool keyboardWheelFallback = false;
+    bool nativeProbe = false;
     {
         std::lock_guard lock(g_configMutex);
         g_config = LoadConfig();
         g_enabled = g_config.enabled;
         keyboardWheelFallback = g_config.keyboardWheelFallback;
+        nativeProbe = g_config.nativeProbe;
     }
     Log(keyboardWheelFallback
         ? "Quick Gadgets enabled. Keyboard wheel fallback is ON."
         : "Quick Gadgets enabled. Native route only; keyboard wheel fallback is OFF.");
-    if (config.nativeProbe) {
+    if (nativeProbe) {
         std::thread(NativeProbeWorker).detach();
     } else {
         Log("Native probe is disabled; no game component calls will be made.");
