@@ -46,6 +46,7 @@ struct Config {
     int inputDelayMs = 18;
     bool restoreWebShooter = false;
     bool keyboardWheelFallback = false;
+    bool nativeProbe = false;
     bool enabled = true;
 };
 
@@ -316,6 +317,7 @@ Config LoadConfig() {
     config.inputDelayMs = std::max(1, ReadInt(L"QuickGadgets", L"InputDelayMs", config.inputDelayMs, path));
     config.restoreWebShooter = ReadBool(L"QuickGadgets", L"RestoreWebShooter", config.restoreWebShooter, path);
     config.keyboardWheelFallback = ReadBool(L"QuickGadgets", L"KeyboardWheelFallback", config.keyboardWheelFallback, path);
+    config.nativeProbe = ReadBool(L"QuickGadgets", L"NativeProbe", config.nativeProbe, path);
     config.enabled = ReadBool(L"QuickGadgets", L"Enabled", config.enabled, path);
     for (int i = 0; i < kGadgetCount; ++i) {
         const std::wstring name = L"Slot" + std::to_wstring(i + 1);
@@ -366,7 +368,11 @@ void Worker() {
     Log(keyboardWheelFallback
         ? "Quick Gadgets enabled. Keyboard wheel fallback is ON."
         : "Quick Gadgets enabled. Native route only; keyboard wheel fallback is OFF.");
-    std::thread(NativeProbeWorker).detach();
+    if (config.nativeProbe) {
+        std::thread(NativeProbeWorker).detach();
+    } else {
+        Log("Native probe is disabled; no game component calls will be made.");
+    }
 
     bool modifierWasDown = false;
     bool modifierUsed = false;

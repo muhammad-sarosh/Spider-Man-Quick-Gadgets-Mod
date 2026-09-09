@@ -42,7 +42,9 @@ The current development build runs a read-only native probe after attach. Once
 a save is loaded, findings are written to `QuickGadgets.log` beside the DLL and
 include the live hero component list. This confirms which gadget-control
 objects and vtables are available before calling any internal direct-fire
-routine; it does not change gameplay by itself.
+routine; it does not change gameplay by itself. The probe is now opt-in:
+NativeProbe=1 is required, because some Script Hook builds can crash while
+enumerating components. Leave it at 0 for normal play.
 
 ## Configure
 
