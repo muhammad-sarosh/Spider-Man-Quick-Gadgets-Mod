@@ -1,15 +1,15 @@
 # Quick Gadgets for Marvel's Spider-Man Remastered
 
-Quick Gadgets is a keyboard-first Spider-Man 2-style gadget mod. A modifier tap
-fires Web Shooter; holding the modifier and pressing a shortcut selects and
-fires a specific gadget immediately, without asking you to use the wheel.
+Quick Gadgets is an experimental Spider-Man 2-style direct-gadget mod. The
+current development build attaches to the game and probes the live hero's
+gadget components through Script Hook. The native route is the target for
+controller support.
 
-This initial release deliberately drives the game's own **Previous Gadget**,
-**Next Gadget**, and **Use Gadget** actions. That gives the game responsibility
-for the actual ammo, availability, animations, and HUD updates, and avoids
-hard-coded executable addresses.
+The old keyboard-wheel implementation is retained only as an opt-in diagnostic
+fallback. It sends synthetic `[`, `]`, and `E` keystrokes, is focus-sensitive,
+and is disabled by default because it is not suitable for controller play.
 
-## Default controls
+## Optional keyboard fallback controls
 
 | Shortcut | Gadget |
 | --- | --- |
@@ -23,23 +23,25 @@ hard-coded executable addresses.
 | `Alt + 7` | Concussive Blast |
 | `Alt + 8` | Suspension Matrix |
 
-`F10` enables or disables the mod.
+`F10` enables or disables the mod. Enable this path with
+`KeyboardWheelFallback=1` in `QuickGadgets.ini` only when testing with a
+focused keyboard-and-mouse game window.
 
 ## Install
 
 1. Install the current community **Spider-Man PC Script Hook** for the exact
    version of your game.
-2. In the game, assign unique keyboard bindings for **Previous Gadget**, **Next
-   Gadget**, and **Use Gadget**. The defaults in this project expect `[`, `]`,
-   and `E`.
+2. If you enable the optional keyboard fallback, assign unique keyboard
+   bindings for **Previous Gadget**, **Next Gadget**, and **Use Gadget**. The
+   defaults in this project expect `[`, `]`, and `E`.
 3. Build the `package` CMake target. Copy `QuickGadgets.script` and
    `QuickGadgets.ini` into the game’s `scripts` folder.
 4. Launch the game through the Script Hook/community loader.
 
-The current development build also runs a read-only native probe after the
-script loads. Once a save is loaded, its findings are printed in the Script
-Hook console with a `[QuickGadgets]` prefix. This confirms which live hero
-gadget components are available before we call any internal direct-fire
+The current development build runs a read-only native probe after attach. Once
+a save is loaded, findings are written to `QuickGadgets.log` beside the DLL and
+include the live hero component list. This confirms which gadget-control
+objects and vtables are available before calling any internal direct-fire
 routine; it does not change gameplay by itself.
 
 ## Configure
@@ -48,13 +50,15 @@ Edit `QuickGadgets.ini` beside the script before launching the game. Values are
 Windows virtual-key codes; common examples are `18` for Alt, `16` for Shift,
 `17` for Ctrl, and `49` through `56` for `1` through `8`.
 
+`KeyboardWheelFallback=0` is the default and is the correct setting for the
+native/controller route. Set it to `1` only for the legacy keyboard test.
+
 The wheel order is the default Remastered order. If a mod changes that order,
 reassign the `Slot1`...`Slot8` key values to match its actual order.
 
-Every direct shortcut first anchors the game to the first wheel slot by sending
-several Previous Gadget pulses, then advances to the requested gadget and fires
-it. This is intentionally stateless: manually opening the wheel or a mission
-changing the active gadget cannot desynchronise Quick Gadgets.
+When enabled, the legacy fallback anchors the game to the first wheel slot by
+sending several Previous Gadget pulses, then advances to the requested gadget
+and fires it. This path is intentionally stateless but remains keyboard-only.
 
 `RestoreWebShooter=1` is enabled by default and makes the mod return to Web
 Shooter after every non-web gadget use, matching Spider-Man 2’s non-persistent

@@ -45,6 +45,7 @@ struct Config {
     int anchorPreviousPulses = 12;
     int inputDelayMs = 18;
     bool restoreWebShooter = false;
+    bool keyboardWheelFallback = false;
     bool enabled = true;
 };
 
@@ -153,12 +154,19 @@ struct EngineString {
 };
 
 using GetPlayerHeroFn = void* (*)();
+struct PointerVector {
+    void** begin = nullptr;
+    void** end = nullptr;
+    void** capacity = nullptr;
+};
+using GetComponentsFn = void (*)(PointerVector*, void*);
 using GetComponentByNameFn = void* (*)(void*, EngineString*);
 using GetComponentNameFn = const char* (*)(void*);
 using GameMainThreadCallFn = void (*)(void (*)());
 
 struct NativeApi {
     GetPlayerHeroFn getPlayerHero = nullptr;
+    GetComponentsFn getComponents = nullptr;
     GetComponentByNameFn getComponentByName = nullptr;
     GetComponentNameFn getComponentName = nullptr;
     GameMainThreadCallFn gameMainThreadCall = nullptr;
@@ -167,6 +175,7 @@ struct NativeApi {
         const auto hook = GetModuleHandleA("ScriptHookSMPC.dll");
         if (!hook) return false;
         getPlayerHero = reinterpret_cast<GetPlayerHeroFn>(GetProcAddress(hook, "GetPlayerHero"));
+        getComponents = reinterpret_cast<GetComponentsFn>(GetProcAddress(hook, "GetComponents"));
         getComponentByName = reinterpret_cast<GetComponentByNameFn>(GetProcAddress(hook, "GetComponentByName"));
         getComponentName = reinterpret_cast<GetComponentNameFn>(GetProcAddress(hook, "GetComponentName"));
         gameMainThreadCall = reinterpret_cast<GameMainThreadCallFn>(GetProcAddress(hook, "GameMainThreadCallFunc"));
@@ -190,6 +199,34 @@ void ProbeComponentsOnGameThread() {
         char line[128]{};
         std::snprintf(line, sizeof(line), "Hero entity found at %p; probing gadget components", hero);
         Log(line);
+    }
+
+    if (g_native.getComponents) {
+        PointerVector components{};
+        g_native.getComponents(&components, hero);
+        if (components.begin && components.end && components.end >= components.begin) {
+            const auto count = static_cast<std::size_t>(components.end - components.begin);
+            char line[128]{};
+            std::snprintf(line, sizeof(line), "Hero component enumeration returned %zu entries", count);
+            Log(line);
+            for (std::size_t i = 0; i < count && i < 512; ++i) {
+                void* component = components.begin[i];
+                if (!component) continue;
+                const char* name = g_native.getComponentName
+                    ? g_native.getComponentName(component)
+                    : nullptr;
+                char componentLine[256]{};
+                std::snprintf(componentLine, sizeof(componentLine),
+                              "Hero component[%03zu] %-48s -> %p (vtable: %p)",
+                              i,
+                              name ? name : "<unnamed>",
+                              component,
+                              *reinterpret_cast<void**>(component));
+                Log(componentLine);
+            }
+        } else {
+            Log("GetComponents returned an empty or invalid component vector");
+        }
     }
 
     constexpr const char* kCandidates[] = {
@@ -260,6 +297,7 @@ Config LoadConfig() {
     config.anchorPreviousPulses = std::max(1, ReadInt(L"QuickGadgets", L"AnchorPreviousPulses", config.anchorPreviousPulses, path));
     config.inputDelayMs = std::max(1, ReadInt(L"QuickGadgets", L"InputDelayMs", config.inputDelayMs, path));
     config.restoreWebShooter = ReadBool(L"QuickGadgets", L"RestoreWebShooter", config.restoreWebShooter, path);
+    config.keyboardWheelFallback = ReadBool(L"QuickGadgets", L"KeyboardWheelFallback", config.keyboardWheelFallback, path);
     config.enabled = ReadBool(L"QuickGadgets", L"Enabled", config.enabled, path);
     for (int i = 0; i < kGadgetCount; ++i) {
         const std::wstring name = L"Slot" + std::to_wstring(i + 1);
@@ -300,12 +338,16 @@ bool Down(WORD key) {
 }
 
 void Worker() {
+    bool keyboardWheelFallback = false;
     {
         std::lock_guard lock(g_configMutex);
         g_config = LoadConfig();
         g_enabled = g_config.enabled;
+        keyboardWheelFallback = g_config.keyboardWheelFallback;
     }
-    Log("Quick Gadgets enabled. F10 toggles it by default.");
+    Log(keyboardWheelFallback
+        ? "Quick Gadgets enabled. Keyboard wheel fallback is ON."
+        : "Quick Gadgets enabled. Native route only; keyboard wheel fallback is OFF.");
     std::thread(NativeProbeWorker).detach();
 
     bool modifierWasDown = false;
@@ -322,6 +364,13 @@ void Worker() {
         if (Pressed(config.toggleKey)) {
             g_enabled = !g_enabled;
             Log(g_enabled ? "Quick Gadgets: enabled" : "Quick Gadgets: disabled");
+        }
+
+        if (!config.keyboardWheelFallback) {
+            modifierWasDown = false;
+            modifierUsed = false;
+            Sleep(2);
+            continue;
         }
 
         const bool modifierDown = g_enabled && Down(config.modifier);
