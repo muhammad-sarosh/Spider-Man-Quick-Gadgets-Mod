@@ -53,6 +53,37 @@ std::mutex g_configMutex;
 std::atomic_bool g_running = true;
 std::atomic_bool g_enabled = true;
 
+// Keep this marker independent of the C++ stream/CRT logging path. If the
+// loader calls script_enable(), this file should appear beside the DLL even
+// when Script Hook's console/stdout capture is unavailable.
+void WriteEntryMarker(const char* message) {
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&WriteEntryMarker), &module)) {
+        return;
+    }
+
+    std::array<wchar_t, MAX_PATH> path{};
+    const DWORD length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) return;
+
+    std::wstring markerPath(path.data(), length);
+    const auto slash = markerPath.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return;
+    markerPath.resize(slash + 1);
+    markerPath += L"QuickGadgets.entry.log";
+
+    const HANDLE file = CreateFileW(markerPath.c_str(), FILE_APPEND_DATA,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+
+    DWORD written = 0;
+    WriteFile(file, message, static_cast<DWORD>(std::strlen(message)), &written, nullptr);
+    CloseHandle(file);
+}
+
 std::wstring GetModuleDirectory() {
     HMODULE module = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -325,6 +356,10 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
 // The current MSMR community script loader invokes this export after loading a
 // script package. Keep the worker outside DllMain so the loader lock is never held.
 extern "C" __declspec(dllexport) void script_enable() {
+    WriteEntryMarker("script_enable called\r\n");
     static std::once_flag started;
-    std::call_once(started, [] { std::thread(Worker).detach(); });
+    std::call_once(started, [] {
+        WriteEntryMarker("worker started\r\n");
+        std::thread(Worker).detach();
+    });
 }
