@@ -272,114 +272,6 @@ void InstallEquipTrace(void* component) {
     Log("Installed temporary SunsetEquipManager native call trace (slots 13,15,19,25,26,27)");
 }
 
-struct InventoryTraceState {
-    void*** objectVtable = nullptr;
-    void** originalVtable = nullptr;
-    void** clonedVtable = nullptr;
-    TraceMethodFn originals[32]{};
-    std::atomic_uint32_t calls[32]{};
-    bool installed = false;
-};
-
-InventoryTraceState g_inventoryTrace;
-
-std::uintptr_t TraceInventoryCall(int slot, void* self, void* rdx, void* r8, void* r9) {
-    if (slot >= 0 && slot < 32) {
-        const auto count = g_inventoryTrace.calls[slot].fetch_add(1);
-        if (count < 12) {
-            char line[256]{};
-            std::snprintf(line, sizeof(line),
-                          "GameInventoryManager native call slot %d: this=%p rdx=%p r8=%p r9=%p",
-                          slot, self, rdx, r8, r9);
-            Log(line);
-        }
-        if (g_inventoryTrace.originals[slot]) {
-            return g_inventoryTrace.originals[slot](self, rdx, r8, r9);
-        }
-    }
-    return 0;
-}
-
-#define QUICK_GADGETS_INVENTORY_WRAPPER(n) \
-    std::uintptr_t TraceInventory##n(void* self, void* rdx, void* r8, void* r9) { \
-        return TraceInventoryCall(n, self, rdx, r8, r9); \
-    }
-
-QUICK_GADGETS_INVENTORY_WRAPPER(10)
-QUICK_GADGETS_INVENTORY_WRAPPER(11)
-QUICK_GADGETS_INVENTORY_WRAPPER(12)
-QUICK_GADGETS_INVENTORY_WRAPPER(13)
-QUICK_GADGETS_INVENTORY_WRAPPER(14)
-QUICK_GADGETS_INVENTORY_WRAPPER(15)
-QUICK_GADGETS_INVENTORY_WRAPPER(16)
-QUICK_GADGETS_INVENTORY_WRAPPER(17)
-QUICK_GADGETS_INVENTORY_WRAPPER(18)
-QUICK_GADGETS_INVENTORY_WRAPPER(19)
-QUICK_GADGETS_INVENTORY_WRAPPER(20)
-QUICK_GADGETS_INVENTORY_WRAPPER(21)
-QUICK_GADGETS_INVENTORY_WRAPPER(22)
-QUICK_GADGETS_INVENTORY_WRAPPER(23)
-QUICK_GADGETS_INVENTORY_WRAPPER(24)
-QUICK_GADGETS_INVENTORY_WRAPPER(25)
-QUICK_GADGETS_INVENTORY_WRAPPER(26)
-QUICK_GADGETS_INVENTORY_WRAPPER(27)
-QUICK_GADGETS_INVENTORY_WRAPPER(28)
-QUICK_GADGETS_INVENTORY_WRAPPER(29)
-QUICK_GADGETS_INVENTORY_WRAPPER(30)
-QUICK_GADGETS_INVENTORY_WRAPPER(31)
-
-#undef QUICK_GADGETS_INVENTORY_WRAPPER
-
-void InstallInventoryTrace(void* component) {
-    if (g_inventoryTrace.installed || !component) return;
-
-    auto*** objectVtable = reinterpret_cast<void***>(component);
-    if (!objectVtable || !*objectVtable) return;
-
-    auto** cloned = new (std::nothrow) void*[32];
-    if (!cloned) return;
-    std::memcpy(cloned, *objectVtable, sizeof(void*) * 32);
-
-    g_inventoryTrace.objectVtable = objectVtable;
-    g_inventoryTrace.originalVtable = *objectVtable;
-    g_inventoryTrace.clonedVtable = cloned;
-    constexpr int kFirstSlot = 10;
-    void* wrappers[22] = {
-        reinterpret_cast<void*>(&TraceInventory10),
-        reinterpret_cast<void*>(&TraceInventory11),
-        reinterpret_cast<void*>(&TraceInventory12),
-        reinterpret_cast<void*>(&TraceInventory13),
-        reinterpret_cast<void*>(&TraceInventory14),
-        reinterpret_cast<void*>(&TraceInventory15),
-        reinterpret_cast<void*>(&TraceInventory16),
-        reinterpret_cast<void*>(&TraceInventory17),
-        reinterpret_cast<void*>(&TraceInventory18),
-        reinterpret_cast<void*>(&TraceInventory19),
-        reinterpret_cast<void*>(&TraceInventory20),
-        reinterpret_cast<void*>(&TraceInventory21),
-        reinterpret_cast<void*>(&TraceInventory22),
-        reinterpret_cast<void*>(&TraceInventory23),
-        reinterpret_cast<void*>(&TraceInventory24),
-        reinterpret_cast<void*>(&TraceInventory25),
-        reinterpret_cast<void*>(&TraceInventory26),
-        reinterpret_cast<void*>(&TraceInventory27),
-        reinterpret_cast<void*>(&TraceInventory28),
-        reinterpret_cast<void*>(&TraceInventory29),
-        reinterpret_cast<void*>(&TraceInventory30),
-        reinterpret_cast<void*>(&TraceInventory31),
-    };
-    for (int i = 0; i < 22; ++i) {
-        const int slot = kFirstSlot + i;
-        g_inventoryTrace.originals[slot] =
-            reinterpret_cast<TraceMethodFn>(cloned[slot]);
-        cloned[slot] = wrappers[i];
-    }
-
-    *objectVtable = cloned;
-    g_inventoryTrace.installed = true;
-    Log("Installed temporary GameInventoryManager native call trace (slots 10-31)");
-}
-
 void ProbeComponentsOnGameThread() {
     if (!g_running || !g_native.getPlayerHero || !g_native.getComponentByName) return;
 
@@ -419,9 +311,6 @@ void ProbeComponentsOnGameThread() {
 
                 if (name && std::strcmp(name, "SunsetEquipManager") == 0) {
                     InstallEquipTrace(component);
-                }
-                if (name && std::strcmp(name, "GameInventoryManager") == 0) {
-                    InstallInventoryTrace(component);
                 }
 
                 const bool interesting = name &&
