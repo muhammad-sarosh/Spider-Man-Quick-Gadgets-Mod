@@ -679,7 +679,10 @@ std::uint32_t FindGadgetWeaponId(void* manager, int slot, const char** matchedNa
     if (!manager || slot < 0 || slot >= kGadgetCount) return 0;
     constexpr std::array<std::array<const char*, 3>, kGadgetCount> kNames{{
         {{"WebShooter", nullptr, nullptr}},
-        {{"ImpactWeb", nullptr, nullptr}},
+        // The player-facing Impact Web wheel entry is named WebBlast in the
+        // loaded weapon inventory. ImpactWeb (0x9C61) is a separate internal
+        // variant and does not update the gadget UI or active fire handler.
+        {{"WebBlast", nullptr, nullptr}},
         {{"SpiderDrone", nullptr, nullptr}},
         {{"ElectricWeb", nullptr, nullptr}},
         {{"WebBomb", nullptr, nullptr}},
