@@ -49,6 +49,7 @@ struct Config {
     bool nativeDirectSelect = true;
     bool nativeDirectFire = true;
     bool controllerEnabled = true;
+    int controllerIndex = -1;
     std::array<int, 4> controllerSlots{ 4, 3, 1, 2 }; // A, B, X, Y; zero-based.
     bool nativeProbe = false;
     int nativeProbeLevel = 1;
@@ -596,6 +597,8 @@ Config LoadConfig() {
     config.nativeDirectSelect = ReadBool(L"QuickGadgets", L"NativeDirectSelect", config.nativeDirectSelect, path);
     config.nativeDirectFire = ReadBool(L"QuickGadgets", L"NativeDirectFire", config.nativeDirectFire, path);
     config.controllerEnabled = ReadBool(L"Controller", L"Enabled", config.controllerEnabled, path);
+    config.controllerIndex = std::clamp(
+        ReadInt(L"Controller", L"Index", config.controllerIndex, path), -1, 3);
     config.controllerSlots[0] = std::clamp(ReadInt(L"Controller", L"A", config.controllerSlots[0] + 1, path) - 1, 0, 7);
     config.controllerSlots[1] = std::clamp(ReadInt(L"Controller", L"B", config.controllerSlots[1] + 1, path) - 1, 0, 7);
     config.controllerSlots[2] = std::clamp(ReadInt(L"Controller", L"X", config.controllerSlots[2] + 1, path) - 1, 0, 7);
@@ -681,7 +684,13 @@ void Worker() {
     bool modifierUsed = false;
     auto modifierDownAt = std::chrono::steady_clock::now();
     const auto xinputGetState = ResolveXInputGetState();
+    if (xinputGetState) {
+        Log("XInput controller polling is available");
+    } else {
+        Log("XInput controller polling is unavailable; keyboard triggers remain available");
+    }
     WORD previousControllerButtons = 0;
+    int activeControllerIndex = -1;
 
     while (g_running) {
         Config config;
@@ -707,7 +716,40 @@ void Worker() {
 
             if (config.controllerEnabled && xinputGetState) {
                 XInputState state{};
-                if (xinputGetState(0, &state) == ERROR_SUCCESS) {
+                int candidateIndex = config.controllerIndex;
+                DWORD controllerResult = ERROR_DEVICE_NOT_CONNECTED;
+                if (candidateIndex < 0) {
+                    if (activeControllerIndex >= 0) {
+                        candidateIndex = activeControllerIndex;
+                        controllerResult = xinputGetState(
+                            static_cast<DWORD>(candidateIndex), &state);
+                    }
+                    if (controllerResult != ERROR_SUCCESS) {
+                        activeControllerIndex = -1;
+                        for (DWORD index = 0; index < 4; ++index) {
+                            if (xinputGetState(index, &state) == ERROR_SUCCESS) {
+                                candidateIndex = static_cast<int>(index);
+                                controllerResult = ERROR_SUCCESS;
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    controllerResult = xinputGetState(
+                        static_cast<DWORD>(candidateIndex), &state);
+                }
+
+                const bool connected = candidateIndex >= 0 &&
+                    controllerResult == ERROR_SUCCESS;
+                if (connected) {
+                    if (activeControllerIndex != candidateIndex) {
+                        activeControllerIndex = candidateIndex;
+                        previousControllerButtons = 0;
+                        char line[96]{};
+                        std::snprintf(line, sizeof(line), "Using XInput controller index %d",
+                                      activeControllerIndex);
+                        Log(line);
+                    }
                     constexpr WORD kRightShoulder = 0x0200;
                     constexpr WORD kFaces[] = { 0x1000, 0x2000, 0x4000, 0x8000 }; // A B X Y
                     constexpr WORD kFaceMask = 0xF000;
@@ -730,6 +772,7 @@ void Worker() {
                     }
                     previousControllerButtons = buttons;
                 } else {
+                    activeControllerIndex = -1;
                     g_controllerComboHeld = false;
                     previousControllerButtons = 0;
                 }
