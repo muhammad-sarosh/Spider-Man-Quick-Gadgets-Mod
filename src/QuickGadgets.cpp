@@ -264,7 +264,6 @@ bool HookedQueryAction(void* inputContext, std::uint32_t action, float threshold
     const auto returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
     if (action == kActionUseGadget &&
         returnAddress == module + kDirectUseGadgetReturnRva &&
-        inputContext == g_forceUseGadgetContext.load() &&
         GetTickCount64() <= g_forceUseGadgetDeadline.load() &&
         g_forceUseGadgetPending.exchange(false)) {
         g_forceUseGadgetObserved = true;
@@ -281,7 +280,6 @@ bool HookedQueryActionWindow(void* inputContext, std::uint32_t action,
     const auto returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
     if (action == kActionUseGadget &&
         returnAddress == module + kDirectUseGadgetWindowReturnRva &&
-        inputContext == g_forceUseGadgetContext.load() &&
         GetTickCount64() <= g_forceUseGadgetDeadline.load() &&
         g_forceUseGadgetPending.exchange(false)) {
         g_forceUseGadgetObserved = true;
