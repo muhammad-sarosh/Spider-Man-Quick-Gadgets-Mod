@@ -219,6 +219,32 @@ std::atomic_ullong g_delayedNativeFireAt = 0;
 std::atomic<void*> g_weaponManager = nullptr;
 std::atomic<void*> g_cachedHero = nullptr;
 
+// Temporary diagnostic mode: observe one genuine wheel selection and gadget
+// shot without modifying controller input. This replaces further speculative
+// fire attempts with evidence from the game's own working path.
+constexpr bool kNativeTraceBuild = true;
+std::atomic_uint g_setWeaponTraceSequence = 0;
+std::atomic_uint g_setWeaponTraceId = 0;
+std::atomic_uint g_setWeaponTraceSlot = 0;
+std::atomic_uint g_setWeaponTraceForce = 0;
+std::atomic_uint g_setWeaponTraceResult = 0;
+std::atomic_uint g_setWeaponTraceBefore0 = 0;
+std::atomic_uint g_setWeaponTraceBefore1 = 0;
+std::atomic_uint g_setWeaponTraceBefore2 = 0;
+std::atomic_uint g_setWeaponTraceAfter0 = 0;
+std::atomic_uint g_setWeaponTraceAfter1 = 0;
+std::atomic_uint g_setWeaponTraceAfter2 = 0;
+std::atomic_uint g_setWeaponTraceState790 = 0;
+std::atomic_uint g_setWeaponTraceState798 = 0;
+std::atomic_ullong g_setWeaponTraceManager = 0;
+std::atomic_uint g_useQueryTraceSequence = 0;
+std::atomic_uint g_useQueryTraceKind = 0;
+std::atomic_uint g_useQueryTraceResult = 0;
+std::atomic_ullong g_useQueryTraceCaller = 0;
+std::atomic_uint g_actionDispatchTraceSequence = 0;
+std::atomic_ullong g_actionDispatchTraceObject = 0;
+std::atomic_ullong g_actionDispatchTraceCaller = 0;
+
 // Verified against Spider-Man.exe 4.0630.0.0. The manager owns eight weapon
 // slots (40 bytes each) and the game's own setter accepts the weapon id stored
 // in one of those slots. This changes the active gadget without sending any
@@ -239,6 +265,7 @@ constexpr std::uintptr_t kQueryActionWindowRva = 0x09095E0;
 constexpr std::uintptr_t kDirectUseGadgetWindowReturnRva = 0x08A2AE3;
 constexpr std::uintptr_t kQueryActionFlagRva = 0x0909520;
 constexpr std::uintptr_t kControllerUseGadgetFlagReturnRva = 0x07943AC;
+constexpr std::uintptr_t kActionDispatchRva = 0x08A2CC0;
 constexpr std::size_t kInputContextHandleOffset = 0x78C;
 constexpr std::size_t kWeaponInventoryBase = 0x1A8;
 constexpr std::size_t kWeaponInventoryStride = 0x18;
@@ -272,6 +299,151 @@ void* g_queryActionFlagTrampoline = nullptr;
 std::array<std::uint8_t, 17> g_queryActionFlagOriginalBytes{};
 bool g_queryActionFlagHookInstalled = false;
 
+using SetActiveWeaponFn = bool (*)(void*, std::uint32_t, std::uint32_t, bool);
+SetActiveWeaponFn g_originalSetActiveWeapon = nullptr;
+void* g_setActiveWeaponTrampoline = nullptr;
+std::array<std::uint8_t, 15> g_setActiveWeaponOriginalBytes{};
+bool g_setActiveWeaponHookInstalled = false;
+
+using ActionDispatchFn = void (*)(void*);
+ActionDispatchFn g_originalActionDispatch = nullptr;
+void* g_actionDispatchTrampoline = nullptr;
+std::array<std::uint8_t, 14> g_actionDispatchOriginalBytes{};
+bool g_actionDispatchHookInstalled = false;
+
+void WriteAbsoluteJump(std::uint8_t* address, const void* destination) {
+    address[0] = 0xFF;
+    address[1] = 0x25;
+    *reinterpret_cast<std::uint32_t*>(address + 2) = 0;
+    *reinterpret_cast<std::uintptr_t*>(address + 6) =
+        reinterpret_cast<std::uintptr_t>(destination);
+}
+
+bool HookedSetActiveWeapon(void* manager, std::uint32_t weaponId,
+                           std::uint32_t slot, bool force) {
+    const auto base = reinterpret_cast<std::uintptr_t>(manager);
+    const std::uint32_t before0 = manager
+        ? *reinterpret_cast<const std::uint32_t*>(base + 0x6C) : 0;
+    const std::uint32_t before1 = manager
+        ? *reinterpret_cast<const std::uint32_t*>(base + 0x94) : 0;
+    const std::uint32_t before2 = manager
+        ? *reinterpret_cast<const std::uint32_t*>(base + 0xBC) : 0;
+    const bool result = g_originalSetActiveWeapon
+        ? g_originalSetActiveWeapon(manager, weaponId, slot, force)
+        : false;
+
+    g_setWeaponTraceManager = base;
+    g_setWeaponTraceId = weaponId;
+    g_setWeaponTraceSlot = slot;
+    g_setWeaponTraceForce = force ? 1u : 0u;
+    g_setWeaponTraceResult = result ? 1u : 0u;
+    g_setWeaponTraceBefore0 = before0;
+    g_setWeaponTraceBefore1 = before1;
+    g_setWeaponTraceBefore2 = before2;
+    g_setWeaponTraceAfter0 = manager
+        ? *reinterpret_cast<const std::uint32_t*>(base + 0x6C) : 0;
+    g_setWeaponTraceAfter1 = manager
+        ? *reinterpret_cast<const std::uint32_t*>(base + 0x94) : 0;
+    g_setWeaponTraceAfter2 = manager
+        ? *reinterpret_cast<const std::uint32_t*>(base + 0xBC) : 0;
+    g_setWeaponTraceState790 = manager
+        ? *reinterpret_cast<const std::uint32_t*>(base + 0x790) : 0;
+    g_setWeaponTraceState798 = manager
+        ? *reinterpret_cast<const std::uint32_t*>(base + 0x798) : 0;
+    g_setWeaponTraceSequence.fetch_add(1);
+    return result;
+}
+
+void HookedActionDispatch(void* actionComponent) {
+    g_actionDispatchTraceObject = reinterpret_cast<std::uintptr_t>(actionComponent);
+    g_actionDispatchTraceCaller = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+    g_actionDispatchTraceSequence.fetch_add(1);
+    if (g_originalActionDispatch) g_originalActionDispatch(actionComponent);
+}
+
+bool InstallNativeTraceHooks() {
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    auto install = [](std::uint8_t* target, const std::uint8_t* expected,
+                      std::size_t length, std::uint8_t* saved,
+                      void** trampolineOut, const void* hook) {
+        if (std::memcmp(target, expected, length) != 0) return false;
+        auto* trampoline = static_cast<std::uint8_t*>(VirtualAlloc(
+            nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        if (!trampoline) return false;
+        std::memcpy(saved, target, length);
+        std::memcpy(trampoline, target, length);
+        WriteAbsoluteJump(trampoline + length, target + length);
+        DWORD oldProtect = 0;
+        if (!VirtualProtect(target, length, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+            VirtualFree(trampoline, 0, MEM_RELEASE);
+            return false;
+        }
+        WriteAbsoluteJump(target, hook);
+        for (std::size_t i = 14; i < length; ++i) target[i] = 0x90;
+        FlushInstructionCache(GetCurrentProcess(), target, length);
+        DWORD ignored = 0;
+        VirtualProtect(target, length, oldProtect, &ignored);
+        *trampolineOut = trampoline;
+        return true;
+    };
+
+    constexpr std::uint8_t kSetterPrologue[] = {
+        0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74,
+        0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x30
+    };
+    constexpr std::uint8_t kDispatchPrologue[] = {
+        0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B,
+        0x01, 0x48, 0x8B, 0xD9, 0xFF, 0x50, 0x30
+    };
+    if (!install(reinterpret_cast<std::uint8_t*>(module + kSetActiveWeaponRva),
+                 kSetterPrologue, sizeof(kSetterPrologue),
+                 g_setActiveWeaponOriginalBytes.data(),
+                 &g_setActiveWeaponTrampoline,
+                 reinterpret_cast<const void*>(&HookedSetActiveWeapon))) {
+        return false;
+    }
+    g_originalSetActiveWeapon = reinterpret_cast<SetActiveWeaponFn>(
+        g_setActiveWeaponTrampoline);
+    g_setActiveWeaponHookInstalled = true;
+
+    if (!install(reinterpret_cast<std::uint8_t*>(module + kActionDispatchRva),
+                 kDispatchPrologue, sizeof(kDispatchPrologue),
+                 g_actionDispatchOriginalBytes.data(),
+                 &g_actionDispatchTrampoline,
+                 reinterpret_cast<const void*>(&HookedActionDispatch))) {
+        return false;
+    }
+    g_originalActionDispatch = reinterpret_cast<ActionDispatchFn>(
+        g_actionDispatchTrampoline);
+    g_actionDispatchHookInstalled = true;
+    return true;
+}
+
+void RemoveNativeTraceHooks() {
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    auto restore = [](std::uint8_t* target, const std::uint8_t* saved,
+                      std::size_t length) {
+        DWORD oldProtect = 0;
+        if (!VirtualProtect(target, length, PAGE_EXECUTE_READWRITE, &oldProtect)) return;
+        std::memcpy(target, saved, length);
+        FlushInstructionCache(GetCurrentProcess(), target, length);
+        DWORD ignored = 0;
+        VirtualProtect(target, length, oldProtect, &ignored);
+    };
+    if (g_actionDispatchHookInstalled) {
+        restore(reinterpret_cast<std::uint8_t*>(module + kActionDispatchRva),
+                g_actionDispatchOriginalBytes.data(),
+                g_actionDispatchOriginalBytes.size());
+        g_actionDispatchHookInstalled = false;
+    }
+    if (g_setActiveWeaponHookInstalled) {
+        restore(reinterpret_cast<std::uint8_t*>(module + kSetActiveWeaponRva),
+                g_setActiveWeaponOriginalBytes.data(),
+                g_setActiveWeaponOriginalBytes.size());
+        g_setActiveWeaponHookInstalled = false;
+    }
+}
+
 bool HookedQueryAction(void* inputContext, std::uint32_t action, float threshold,
                        bool allowHeld, bool useTimeWindow) {
     const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
@@ -283,9 +455,16 @@ bool HookedQueryAction(void* inputContext, std::uint32_t action, float threshold
         g_forceUseGadgetObserved = true;
         return true;
     }
-    return g_originalQueryAction
+    const bool result = g_originalQueryAction
         ? g_originalQueryAction(inputContext, action, threshold, allowHeld, useTimeWindow)
         : false;
+    if (action == kActionUseGadget) {
+        g_useQueryTraceKind = 1;
+        g_useQueryTraceResult = result ? 1u : 0u;
+        g_useQueryTraceCaller = returnAddress;
+        g_useQueryTraceSequence.fetch_add(1);
+    }
+    return result;
 }
 
 bool HookedQueryActionWindow(void* inputContext, std::uint32_t action,
@@ -299,9 +478,16 @@ bool HookedQueryActionWindow(void* inputContext, std::uint32_t action,
         g_forceUseGadgetObserved = true;
         return true;
     }
-    return g_originalQueryActionWindow
+    const bool result = g_originalQueryActionWindow
         ? g_originalQueryActionWindow(inputContext, action, minimum, maximum, allowHeld)
         : false;
+    if (action == kActionUseGadget) {
+        g_useQueryTraceKind = 2;
+        g_useQueryTraceResult = result ? 1u : 0u;
+        g_useQueryTraceCaller = returnAddress;
+        g_useQueryTraceSequence.fetch_add(1);
+    }
+    return result;
 }
 
 bool HookedQueryActionFlag(void* inputContext, std::uint32_t action, bool released) {
@@ -322,9 +508,16 @@ bool HookedQueryActionFlag(void* inputContext, std::uint32_t action, bool releas
             return false;
         }
     }
-    return g_originalQueryActionFlag
+    const bool result = g_originalQueryActionFlag
         ? g_originalQueryActionFlag(inputContext, action, released)
         : false;
+    if (action == kActionUseGadget) {
+        g_useQueryTraceKind = 3;
+        g_useQueryTraceResult = result ? 1u : 0u;
+        g_useQueryTraceCaller = returnAddress;
+        g_useQueryTraceSequence.fetch_add(1);
+    }
+    return result;
 }
 
 bool InstallQueryActionHook() {
@@ -1175,7 +1368,18 @@ void Worker() {
             Log("Native direct select disabled: Spider-Man.exe layout does not match 4.0630.0.0");
         } else {
             Log("Native direct select armed for Spider-Man.exe 4.0630.0.0");
-            if (g_config.nativeDirectFire) {
+            if (kNativeTraceBuild) {
+                const bool pressHook = InstallQueryActionHook();
+                const bool windowHook = InstallQueryActionWindowHook();
+                const bool flagHook = InstallQueryActionFlagHook();
+                const bool nativeTraceHooks = InstallNativeTraceHooks();
+                if (pressHook && windowHook && flagHook && nativeTraceHooks) {
+                    Log("DIAGNOSTIC TRACE READY: mod shortcuts are disabled");
+                    Log("Use the normal R1 wheel to select Impact Web, then tap R1 once");
+                } else {
+                    Log("DIAGNOSTIC TRACE FAILED: one or more native hooks are unavailable");
+                }
+            } else if (g_config.nativeDirectFire) {
                 const bool pressHook = InstallQueryActionHook();
                 const bool windowHook = InstallQueryActionWindowHook();
                 const bool flagHook = InstallQueryActionFlagHook();
@@ -1205,6 +1409,9 @@ void Worker() {
     }
     WORD previousControllerButtons = 0;
     int activeControllerIndex = -1;
+    unsigned seenSetWeaponTrace = 0;
+    unsigned seenUseQueryTrace = 0;
+    unsigned seenActionDispatchTrace = 0;
 
     while (g_running) {
         if (g_delayedNativeFirePending &&
@@ -1224,6 +1431,54 @@ void Worker() {
             Log("Native UseGadget query window expired before gameplay consumed it");
         }
 
+        const unsigned setWeaponTrace = g_setWeaponTraceSequence.load();
+        if (setWeaponTrace != seenSetWeaponTrace) {
+            seenSetWeaponTrace = setWeaponTrace;
+            char line[320]{};
+            std::snprintf(
+                line, sizeof(line),
+                "TRACE SetActiveWeapon #%u manager=%p id=%08X slot=%u force=%u result=%u "
+                "active %08X/%08X/%08X -> %08X/%08X/%08X state790=%08X state798=%08X",
+                setWeaponTrace,
+                reinterpret_cast<void*>(g_setWeaponTraceManager.load()),
+                g_setWeaponTraceId.load(), g_setWeaponTraceSlot.load(),
+                g_setWeaponTraceForce.load(), g_setWeaponTraceResult.load(),
+                g_setWeaponTraceBefore0.load(), g_setWeaponTraceBefore1.load(),
+                g_setWeaponTraceBefore2.load(), g_setWeaponTraceAfter0.load(),
+                g_setWeaponTraceAfter1.load(), g_setWeaponTraceAfter2.load(),
+                g_setWeaponTraceState790.load(), g_setWeaponTraceState798.load());
+            Log(line);
+        }
+        const unsigned useQueryTrace = g_useQueryTraceSequence.load();
+        if (useQueryTrace != seenUseQueryTrace) {
+            seenUseQueryTrace = useQueryTrace;
+            const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+            const auto caller = static_cast<std::uintptr_t>(g_useQueryTraceCaller.load());
+            char line[192]{};
+            std::snprintf(line, sizeof(line),
+                          "TRACE UseGadget query #%u kind=%u result=%u callerRva=%08llX",
+                          useQueryTrace, g_useQueryTraceKind.load(),
+                          g_useQueryTraceResult.load(),
+                          static_cast<unsigned long long>(
+                              caller >= module ? caller - module : caller));
+            Log(line);
+        }
+        const unsigned actionDispatchTrace = g_actionDispatchTraceSequence.load();
+        if (actionDispatchTrace != seenActionDispatchTrace) {
+            seenActionDispatchTrace = actionDispatchTrace;
+            const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+            const auto caller = static_cast<std::uintptr_t>(
+                g_actionDispatchTraceCaller.load());
+            char line[192]{};
+            std::snprintf(line, sizeof(line),
+                          "TRACE ActionDispatch #%u object=%p callerRva=%08llX",
+                          actionDispatchTrace,
+                          reinterpret_cast<void*>(g_actionDispatchTraceObject.load()),
+                          static_cast<unsigned long long>(
+                              caller >= module ? caller - module : caller));
+            Log(line);
+        }
+
         Config config;
         {
             std::lock_guard lock(g_configMutex);
@@ -1235,7 +1490,7 @@ void Worker() {
             Log(g_enabled ? "Quick Gadgets: enabled" : "Quick Gadgets: disabled");
         }
 
-        if (nativeDirectSelect && g_enabled) {
+        if (nativeDirectSelect && g_enabled && !kNativeTraceBuild) {
             if (Down(config.modifier)) {
                 for (int target = 0; target < kGadgetCount; ++target) {
                     if (Pressed(config.slotKeys[target])) {
@@ -1381,6 +1636,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         g_controllerModifierHeld = false;
         g_delayedNativeFirePending = false;
         g_forceUseGadgetPending = false;
+        RemoveNativeTraceHooks();
         RemoveQueryActionFlagHook();
         RemoveQueryActionWindowHook();
         RemoveQueryActionHook();
