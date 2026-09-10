@@ -198,6 +198,9 @@ std::atomic_bool g_pendingNativeFire = false;
 std::atomic_bool g_pendingSuppressFaces = false;
 std::atomic_bool g_nativeUseReleasePending = false;
 std::atomic_ullong g_nativeUseReleaseAt = 0;
+std::atomic_bool g_nativeFirePulseActive = false;
+std::atomic_bool g_controllerComboHeld = false;
+std::atomic_bool g_suppressionCallbackQueued = false;
 std::atomic<void*> g_weaponManager = nullptr;
 std::atomic<void*> g_cachedHero = nullptr;
 
@@ -341,6 +344,7 @@ void SelectNativeSlotOnGameThread() {
         } else {
             if (suppressFaces) SuppressFaceActions(inputContext);
             if (fire) {
+                g_nativeFirePulseActive = true;
                 SetActionValue(inputContext, kActionUseGadget, 1.0f);
                 g_nativeUseReleaseAt = GetTickCount64() + 34;
                 g_nativeUseReleasePending = true;
@@ -355,12 +359,27 @@ void SelectNativeSlotOnGameThread() {
 }
 
 void ReleaseNativeUseOnGameThread() {
+    g_nativeFirePulseActive = false;
     if (!g_native.getPlayerHero) return;
     void* manager = FindHeroWeaponManager(g_native.getPlayerHero());
     void* inputContext = ResolveInputContext(manager);
     if (!inputContext) return;
     SetActionValue(inputContext, kActionUseGadget, 0.0f);
     SuppressFaceActions(inputContext);
+}
+
+void SuppressControllerComboOnGameThread() {
+    if (g_controllerComboHeld && g_native.getPlayerHero) {
+        void* manager = FindHeroWeaponManager(g_native.getPlayerHero());
+        void* inputContext = ResolveInputContext(manager);
+        if (inputContext) {
+            SuppressFaceActions(inputContext);
+            if (!g_nativeFirePulseActive) {
+                SetActionValue(inputContext, kActionUseGadget, 0.0f);
+            }
+        }
+    }
+    g_suppressionCallbackQueued = false;
 }
 
 bool QueueNativeSlot(int slot, bool fire, bool suppressFaces) {
@@ -691,8 +710,15 @@ void Worker() {
                 if (xinputGetState(0, &state) == ERROR_SUCCESS) {
                     constexpr WORD kRightShoulder = 0x0200;
                     constexpr WORD kFaces[] = { 0x1000, 0x2000, 0x4000, 0x8000 }; // A B X Y
+                    constexpr WORD kFaceMask = 0xF000;
                     const WORD buttons = state.gamepad.buttons;
-                    if (buttons & kRightShoulder) {
+                    const bool comboHeld = (buttons & kRightShoulder) &&
+                        (buttons & kFaceMask);
+                    g_controllerComboHeld = comboHeld;
+                    if (comboHeld) {
+                        if (!g_suppressionCallbackQueued.exchange(true)) {
+                            g_native.gameMainThreadCall(&SuppressControllerComboOnGameThread);
+                        }
                         for (int face = 0; face < 4; ++face) {
                             if ((buttons & kFaces[face]) &&
                                 !(previousControllerButtons & kFaces[face])) {
@@ -703,6 +729,9 @@ void Worker() {
                         }
                     }
                     previousControllerButtons = buttons;
+                } else {
+                    g_controllerComboHeld = false;
+                    previousControllerButtons = 0;
                 }
             }
         }
