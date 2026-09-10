@@ -205,8 +205,10 @@ constexpr int kNativeRequestFire = 0x100;
 constexpr int kNativeRequestSuppressFaces = 0x200;
 std::atomic_int g_pendingNativeRequest = kNoNativeRequest;
 std::atomic_bool g_controllerComboHeld = false;
+std::atomic_bool g_controllerModifierHeld = false;
 std::atomic_bool g_nativeFireIssuedForCombo = false;
 std::atomic_bool g_suppressionCallbackQueued = false;
+std::atomic_bool g_physicalUseSuppressedObserved = false;
 std::atomic_bool g_forceUseGadgetPending = false;
 std::atomic_bool g_forceUseGadgetObserved = false;
 std::atomic_ullong g_forceUseGadgetDeadline = 0;
@@ -304,11 +306,19 @@ bool HookedQueryActionFlag(void* inputContext, std::uint32_t action, bool releas
     const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
     const auto returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
     if (action == kActionUseGadget &&
-        returnAddress == module + kControllerUseGadgetFlagReturnRva &&
-        GetTickCount64() <= g_forceUseGadgetDeadline.load() &&
-        g_forceUseGadgetPending.exchange(false)) {
-        g_forceUseGadgetObserved = true;
-        return true;
+        returnAddress == module + kControllerUseGadgetFlagReturnRva) {
+        if (GetTickCount64() <= g_forceUseGadgetDeadline.load() &&
+            g_forceUseGadgetPending.exchange(false)) {
+            g_forceUseGadgetObserved = true;
+            return true;
+        }
+        // RB is the modifier for direct shortcuts. Block its ordinary
+        // Web-Shooter edge while held so it cannot mask the later gadget
+        // projectile. The forced edge above has priority.
+        if (g_controllerModifierHeld.load()) {
+            g_physicalUseSuppressedObserved = true;
+            return false;
+        }
     }
     return g_originalQueryActionFlag
         ? g_originalQueryActionFlag(inputContext, action, released)
@@ -1201,6 +1211,9 @@ void Worker() {
         if (g_forceUseGadgetObserved.exchange(false)) {
             Log("Native UseGadget gameplay query intercepted");
         }
+        if (g_physicalUseSuppressedObserved.exchange(false)) {
+            Log("Physical RB Web-Shooter action suppressed while modifier is held");
+        }
         if (g_forceUseGadgetPending &&
             GetTickCount64() > g_forceUseGadgetDeadline.load() &&
             g_forceUseGadgetPending.exchange(false)) {
@@ -1268,6 +1281,8 @@ void Worker() {
                     constexpr WORD kFaces[] = { 0x1000, 0x2000, 0x4000, 0x8000 }; // A B X Y
                     constexpr WORD kFaceMask = 0xF000;
                     const WORD buttons = state.gamepad.buttons;
+                    g_controllerModifierHeld =
+                        (buttons & kRightShoulder) != 0;
                     const bool comboHeld = (buttons & kRightShoulder) &&
                         (buttons & kFaceMask);
                     g_controllerComboHeld = comboHeld;
@@ -1289,6 +1304,7 @@ void Worker() {
                 } else {
                     activeControllerIndex = -1;
                     g_controllerComboHeld = false;
+                    g_controllerModifierHeld = false;
                     previousControllerButtons = 0;
                 }
             }
@@ -1359,6 +1375,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     }
     if (reason == DLL_PROCESS_DETACH) {
         g_running = false;
+        g_controllerModifierHeld = false;
         g_delayedNativeFirePending = false;
         g_forceUseGadgetPending = false;
         RemoveQueryActionFlagHook();
