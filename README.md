@@ -28,13 +28,24 @@ NativeDirectSelect and NativeDirectFire are enabled. These are physical test
 triggers only; the mod does not send those keys to the game.
 
 On an XInput-compatible controller, leave the game's Gadget Select Button on
-**Hold R1**, then hold LB/L1 and press a face button. The default slot mapping
-is configurable in the Controller section:
+**Hold R1**. The native shortcut layout avoids face buttons so gadget use does
+not also trigger Attack, Dodge, Jump, or Web Strike:
 
-- A/Cross: slot 5 (Web Bomb)
-- B/Circle: slot 4 (Electric Web)
-- X/Square: slot 2 (Impact Web)
-- Y/Triangle: slot 3 (Spider Drone)
+| Shortcut | Gadget |
+| --- | --- |
+| L1 tap | Impact Web |
+| D-pad Left | Web Bomb |
+| D-pad Right | Electric Web |
+| L1 + D-pad Left | Spider Drone |
+| L1 + D-pad Right | Concussive Blast |
+| L2 + D-pad Left | Trip Mine |
+| L2 + D-pad Right | Suspension Matrix |
+
+After a shortcut fires, its gadget remains active for the configurable
+450-millisecond repeat window. Pressing any shortcut again resets the timer;
+repeating the same shortcut fires without another equipment transition.
+Holding L1 or L2 pauses restoration. When the window expires, the mod restores
+Web Shooter without firing it.
 
 F10 enables or disables the mod.
 
@@ -81,9 +92,9 @@ When enabled, the legacy fallback anchors the game to the first wheel slot by
 sending several Previous Gadget pulses, then advances to the requested gadget
 and fires it. This path is intentionally stateless but remains keyboard-only.
 
-RestoreWebShooter currently applies only to the legacy wheel fallback. Native
-auto-restore is intentionally deferred until direct selection and firing have
-been validated in-game.
+RestoreWebShooter applies to the legacy wheel fallback. Native controller
+restoration is controlled separately by AutoRestoreWebShooter and
+RepeatWindowMs in the Controller section.
 
 ## Offline layout verification
 
@@ -100,10 +111,9 @@ HeroWeaponManager vtable entries, and the embedded input-action names/hashes.
 Technical evidence and current limitations are recorded in
 `docs/REVERSE_ENGINEERING.md`.
 
-The native controller path clears Attack, Dodge, Jump, and Web Strike through
-the engine action system during the gadget pulse. This is an experimental
-first pass at preventing face-button leakage; it does not remap the controller
-through Steam Input.
+The native controller path uses D-pad shortcuts rather than face buttons, so it
+does not need to suppress Attack, Dodge, Jump, or Web Strike and does not remap
+the controller through Steam Input.
 
 ## Build
 
@@ -118,9 +128,8 @@ The package is written to `build/package/QuickGadgets.script`.
 
 ## Validation plan
 
-Start with an unlocked slot and verify selection plus firing. If the game
-crashes or only selection works, set NativeDirectFire=0 and repeat. Then test
-the four controller combinations and note whether the normal face-button
-action also occurs. Finally, manually change the wheel selection and repeat;
-the native route addresses slots directly and should not depend on current
-wheel state.
+Start with an unlocked slot and verify selection, firing, repeated firing
+within the repeat window, and automatic restoration to Web Shooter. If the game
+crashes or only selection works, set NativeDirectFire=0 and repeat. Finally,
+manually change the wheel selection and repeat; the native route addresses
+slots directly and should not depend on current wheel state.

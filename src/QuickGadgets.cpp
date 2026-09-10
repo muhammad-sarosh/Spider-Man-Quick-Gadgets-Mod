@@ -51,8 +51,17 @@ struct Config {
     bool nativeDirectFire = true;
     bool controllerEnabled = true;
     int controllerIndex = -1;
-    WORD controllerModifier = 0x0100; // XINPUT_GAMEPAD_LEFT_SHOULDER.
-    std::array<int, 4> controllerSlots{ 4, 3, 1, 2 }; // A, B, X, Y; zero-based.
+    int controllerL1TapSlot = ImpactWeb;
+    int controllerDpadLeftSlot = WebBomb;
+    int controllerDpadRightSlot = ElectricWeb;
+    int controllerL1DpadLeftSlot = SpiderDrone;
+    int controllerL1DpadRightSlot = ConcussiveBlast;
+    int controllerL2DpadLeftSlot = TripMine;
+    int controllerL2DpadRightSlot = SuspensionMatrix;
+    int controllerL1TapMaxMs = 500;
+    BYTE controllerL2Threshold = 30;
+    bool nativeAutoRestore = true;
+    int nativeRepeatWindowMs = 450;
     bool nativeProbe = false;
     int nativeProbeLevel = 1;
     bool enabled = true;
@@ -244,6 +253,10 @@ std::atomic_ullong g_forceUseGadgetDeadline = 0;
 std::atomic<void*> g_forceUseGadgetContext = nullptr;
 std::atomic_bool g_delayedNativeFirePending = false;
 std::atomic_ullong g_delayedNativeFireAt = 0;
+std::atomic_bool g_nativeAutoRestoreEnabled = true;
+std::atomic_uint g_nativeRepeatWindowMs = 450;
+std::atomic_bool g_nativeRestorePending = false;
+std::atomic_ullong g_nativeRestoreAt = 0;
 std::atomic<void*> g_weaponManager = nullptr;
 std::atomic<void*> g_cachedHero = nullptr;
 
@@ -347,17 +360,10 @@ bool IsShortcutModifierPhysicallyHeld() {
     return false;
 }
 
-bool ShouldSuppressControllerFaceAction(std::uint32_t action) {
-    if (!IsControllerFaceAction(action)) return false;
-    if (!g_controllerFaceSuppressionLatched.load() &&
-        !IsShortcutModifierPhysicallyHeld()) {
-        return false;
-    }
-    g_controllerFaceSuppressionLatched = true;
-    if (!g_faceActionSuppressionReported.exchange(true)) {
-        g_faceActionSuppressedObserved = true;
-    }
-    return true;
+bool ShouldSuppressControllerFaceAction(std::uint32_t) {
+    // The active controller layout deliberately avoids face buttons. Preserve
+    // their normal game behavior even while L1/L2 is used for a D-pad chord.
+    return false;
 }
 
 void* HookedGameplayActionReader(void* owner, void* output, void* actionTable,
@@ -1115,6 +1121,13 @@ void SelectNativeSlotOnGameThread() {
                 // press, otherwise the fire handler still owns Web Shooter.
                 g_delayedNativeFireAt = GetTickCount64() + 75;
                 g_delayedNativeFirePending = true;
+                if (slot != WebShooter && g_nativeAutoRestoreEnabled.load()) {
+                    // Keep the selected gadget live briefly so repeated shortcut
+                    // presses can fire again without another equipment transition.
+                    g_nativeRestoreAt =
+                        GetTickCount64() + g_nativeRepeatWindowMs.load();
+                    g_nativeRestorePending = true;
+                }
             }
         }
     }
@@ -1343,12 +1356,34 @@ Config LoadConfig() {
     config.controllerEnabled = ReadBool(L"Controller", L"Enabled", config.controllerEnabled, path);
     config.controllerIndex = std::clamp(
         ReadInt(L"Controller", L"Index", config.controllerIndex, path), -1, 3);
-    config.controllerModifier = static_cast<WORD>(ReadInt(
-        L"Controller", L"ModifierButton", config.controllerModifier, path));
-    config.controllerSlots[0] = std::clamp(ReadInt(L"Controller", L"A", config.controllerSlots[0] + 1, path) - 1, 0, 7);
-    config.controllerSlots[1] = std::clamp(ReadInt(L"Controller", L"B", config.controllerSlots[1] + 1, path) - 1, 0, 7);
-    config.controllerSlots[2] = std::clamp(ReadInt(L"Controller", L"X", config.controllerSlots[2] + 1, path) - 1, 0, 7);
-    config.controllerSlots[3] = std::clamp(ReadInt(L"Controller", L"Y", config.controllerSlots[3] + 1, path) - 1, 0, 7);
+    auto readControllerSlot = [&](const wchar_t* key, int fallback) {
+        return std::clamp(ReadInt(L"Controller", key, fallback + 1, path) - 1, 0, 7);
+    };
+    config.controllerL1TapSlot = readControllerSlot(
+        L"L1Tap", config.controllerL1TapSlot);
+    config.controllerDpadLeftSlot = readControllerSlot(
+        L"DpadLeft", config.controllerDpadLeftSlot);
+    config.controllerDpadRightSlot = readControllerSlot(
+        L"DpadRight", config.controllerDpadRightSlot);
+    config.controllerL1DpadLeftSlot = readControllerSlot(
+        L"L1DpadLeft", config.controllerL1DpadLeftSlot);
+    config.controllerL1DpadRightSlot = readControllerSlot(
+        L"L1DpadRight", config.controllerL1DpadRightSlot);
+    config.controllerL2DpadLeftSlot = readControllerSlot(
+        L"L2DpadLeft", config.controllerL2DpadLeftSlot);
+    config.controllerL2DpadRightSlot = readControllerSlot(
+        L"L2DpadRight", config.controllerL2DpadRightSlot);
+    config.controllerL1TapMaxMs = std::clamp(
+        ReadInt(L"Controller", L"L1TapMaxMs", config.controllerL1TapMaxMs, path),
+        100, 1500);
+    config.controllerL2Threshold = static_cast<BYTE>(std::clamp(
+        ReadInt(L"Controller", L"L2Threshold", config.controllerL2Threshold, path),
+        1, 255));
+    config.nativeAutoRestore = ReadBool(
+        L"Controller", L"AutoRestoreWebShooter", config.nativeAutoRestore, path);
+    config.nativeRepeatWindowMs = std::clamp(
+        ReadInt(L"Controller", L"RepeatWindowMs", config.nativeRepeatWindowMs, path),
+        100, 2000);
     config.nativeProbe = ReadBool(L"QuickGadgets", L"NativeProbe", config.nativeProbe, path);
     config.nativeProbeLevel = std::clamp(ReadInt(L"QuickGadgets", L"NativeProbeLevel",
                                                  config.nativeProbeLevel, path), 1, 5);
@@ -1448,7 +1483,9 @@ void Worker() {
     const auto xinputGetState = ResolveXInputGetState();
     g_xinputGetState = xinputGetState;
     g_configuredControllerIndex = g_config.controllerIndex;
-    g_controllerModifierMask = g_config.controllerModifier;
+    g_nativeAutoRestoreEnabled = g_config.nativeAutoRestore;
+    g_nativeRepeatWindowMs =
+        static_cast<unsigned>(g_config.nativeRepeatWindowMs);
     if (xinputGetState) {
         Log("XInput controller polling is available");
     } else {
@@ -1456,9 +1493,23 @@ void Worker() {
     }
     WORD previousControllerButtons = 0;
     int activeControllerIndex = -1;
+    bool l1WasHeld = false;
+    bool l1UsedAsModifier = false;
+    ULONGLONG l1PressedAt = 0;
+    bool shortcutModifierHeld = false;
     unsigned seenGameplayActionTrace = 0;
 
     while (g_running) {
+        if (g_nativeRestorePending.load() &&
+            GetTickCount64() >= g_nativeRestoreAt.load() &&
+            !shortcutModifierHeld &&
+            !g_delayedNativeFirePending.load() &&
+            !g_forceUseGadgetPending.load()) {
+            if (QueueNativeSlot(WebShooter, false, false)) {
+                g_nativeRestorePending = false;
+                Log("Repeat window ended; restoring Web Shooter");
+            }
+        }
         if (g_delayedNativeFirePending &&
             GetTickCount64() >= g_delayedNativeFireAt.load() &&
             g_delayedNativeFirePending.exchange(false)) {
@@ -1554,44 +1605,64 @@ void Worker() {
                         activeControllerIndex = candidateIndex;
                         g_activeControllerIndex = candidateIndex;
                         previousControllerButtons = 0;
+                        l1WasHeld = false;
+                        l1UsedAsModifier = false;
                         char line[96]{};
                         std::snprintf(line, sizeof(line), "Using XInput controller index %d",
                                       activeControllerIndex);
                         Log(line);
                     }
-                    constexpr WORD kFaces[] = { 0x1000, 0x2000, 0x4000, 0x8000 }; // A B X Y
-                    constexpr WORD kFaceMask = 0xF000;
+                    constexpr WORD kDpadLeft = 0x0004;
+                    constexpr WORD kDpadRight = 0x0008;
+                    constexpr WORD kLeftShoulder = 0x0100;
                     const WORD buttons = state.gamepad.buttons;
-                    const bool modifierHeld =
-                        (buttons & config.controllerModifier) != 0;
-                    g_controllerModifierHeld = modifierHeld;
-                    const bool comboHeld = modifierHeld &&
-                        (buttons & kFaceMask);
-                    g_controllerComboHeld = comboHeld;
-                    if (modifierHeld) {
-                        // Latch before the face-button edge reaches gameplay.
-                        g_controllerFaceSuppressionLatched = true;
-                    } else if ((buttons & kFaceMask) == 0) {
-                        // Keep suppression latched if the modifier is released
-                        // first; clear it only after the physical face button
-                        // has also returned to neutral.
-                        g_controllerFaceSuppressionLatched = false;
-                        g_faceActionSuppressionReported = false;
+                    const bool l1Held = (buttons & kLeftShoulder) != 0;
+                    const bool l2Held =
+                        state.gamepad.leftTrigger >= config.controllerL2Threshold;
+                    shortcutModifierHeld = l1Held || l2Held;
+                    g_controllerModifierHeld = l1Held;
+                    g_controllerComboHeld = false;
+                    g_controllerFaceSuppressionLatched = false;
+                    g_faceActionSuppressionReported = false;
+
+                    const ULONGLONG now = GetTickCount64();
+                    if (l1Held && !l1WasHeld) {
+                        l1PressedAt = now;
+                        l1UsedAsModifier = false;
                     }
-                    if (!comboHeld) g_nativeFireIssuedForCombo = false;
-                    if (comboHeld) {
-                        if (!g_suppressionCallbackQueued.exchange(true)) {
-                            g_native.gameMainThreadCall(&SuppressControllerComboOnGameThread);
+
+                    const bool leftPressed = (buttons & kDpadLeft) &&
+                        !(previousControllerButtons & kDpadLeft);
+                    const bool rightPressed = (buttons & kDpadRight) &&
+                        !(previousControllerButtons & kDpadRight);
+                    if (leftPressed || rightPressed) {
+                        int slot = WebShooter;
+                        if (l1Held) {
+                            slot = leftPressed
+                                ? config.controllerL1DpadLeftSlot
+                                : config.controllerL1DpadRightSlot;
+                            l1UsedAsModifier = true;
+                        } else if (l2Held) {
+                            slot = leftPressed
+                                ? config.controllerL2DpadLeftSlot
+                                : config.controllerL2DpadRightSlot;
+                        } else {
+                            slot = leftPressed
+                                ? config.controllerDpadLeftSlot
+                                : config.controllerDpadRightSlot;
                         }
-                        for (int face = 0; face < 4; ++face) {
-                            if ((buttons & kFaces[face]) &&
-                                !(previousControllerButtons & kFaces[face])) {
-                                QueueNativeSlot(config.controllerSlots[face],
-                                                config.nativeDirectFire, true);
-                                break;
-                            }
-                        }
+                        QueueNativeSlot(slot, config.nativeDirectFire, false);
                     }
+
+                    if (!l1Held && l1WasHeld && !l1UsedAsModifier &&
+                        now - l1PressedAt <=
+                            static_cast<ULONGLONG>(config.controllerL1TapMaxMs)) {
+                        QueueNativeSlot(
+                            config.controllerL1TapSlot,
+                            config.nativeDirectFire, false);
+                    }
+                    if (!shortcutModifierHeld) g_nativeFireIssuedForCombo = false;
+                    l1WasHeld = l1Held;
                     previousControllerButtons = buttons;
                 } else {
                     activeControllerIndex = -1;
@@ -1600,6 +1671,9 @@ void Worker() {
                     g_controllerModifierHeld = false;
                     g_controllerFaceSuppressionLatched = false;
                     g_faceActionSuppressionReported = false;
+                    shortcutModifierHeld = false;
+                    l1WasHeld = false;
+                    l1UsedAsModifier = false;
                     previousControllerButtons = 0;
                 }
             }
@@ -1676,6 +1750,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         g_xinputGetState = nullptr;
         g_activeControllerIndex = -1;
         g_delayedNativeFirePending = false;
+        g_nativeRestorePending = false;
         g_forceUseGadgetPending = false;
         RemoveGameplayActionReaderHook();
         RemoveQueryActionFlagHook();
