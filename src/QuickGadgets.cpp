@@ -1121,27 +1121,13 @@ void SelectNativeSlotOnGameThread() {
     }
 
     if (finalizeWheelState) {
-        // SetActiveWeapon transitions the live gameplay object, but a normal
-        // wheel selection also publishes the gadget override and invokes the
-        // HeroWeaponManager notification wrapper. Without these two steps the
-        // restored Web Shooter can fire while its HUD/ammo model remains bound
-        // to the gadget that was active before restoration.
+        // Publish the wheel gadget ID alongside the proven generic equipment
+        // transition. The earlier notification/HUD callbacks were only added
+        // to compensate for selecting the wrong internal WebShooter asset;
+        // with the correct ImpactWeb asset they can asynchronously disable the
+        // restored weapon shortly after it becomes active.
         *reinterpret_cast<std::uint32_t*>(
             managerAddress + kGadgetOverrideOffset) = weaponId;
-        using SelectWeaponAndNotifyFn = void (*)(void*, std::uint32_t);
-        const auto selectWeaponAndNotify =
-            reinterpret_cast<SelectWeaponAndNotifyFn>(
-                module + kSelectWeaponAndNotifyRva);
-        selectWeaponAndNotify(manager, weaponId);
-
-        // This adjacent HeroWeaponManager virtual is the part that resolves
-        // the selected weapon record and recomputes the three cached HUD state
-        // identifiers at +6E8/+6EC/+6F0. The notification method above does
-        // not update those fields, which leaves Web Shooter red/empty.
-        const auto refreshWeaponHudState =
-            reinterpret_cast<SelectWeaponAndNotifyFn>(
-                module + kRefreshWeaponHudStateRva);
-        refreshWeaponHudState(manager, weaponId);
     }
 
     if (fire || suppressFaces) {
