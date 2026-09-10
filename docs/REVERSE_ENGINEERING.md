@@ -23,6 +23,7 @@ of these routines are called.
 - Resolve weapon record by ID: RVA 0x21633C0
 - Low-level active weapon setter: RVA 0x09A5FF0
 - Selection wrapper with normal notification/activation work: RVA 0x09A4110
+- Selected-weapon HUD state refresh: RVA 0x09A42B0
 
 The slot getter computes manager + 0x6C + slot * 0x28 and returns a 32-bit
 weapon ID, but live inspection proved this table contains only three general
@@ -35,9 +36,10 @@ between sessions.
 The native shortcut path uses the generic equipment transition at RVA
 0x2161A10 to replace the live weapon object. Automatic restoration additionally
 publishes the Web Shooter ID at manager + 0x790 and calls the wrapper at
-0x09A4110. The additional steps synchronize the gadget-wheel HUD and ammo model;
-using only the generic transition left a functional Web Shooter paired with a
-stale empty/red ammo display.
+0x09A4110. It then calls the HUD refresh at 0x09A42B0, which resolves the
+selected weapon record and recomputes the cached identifiers at manager
++0x6E8/+0x6EC/+0x6F0. Using only the generic transition and notification left a
+functional Web Shooter paired with a stale empty/red ammo display.
 
 A live before/after comparison of a normal wheel change from Impact Web to
 Spider Drone showed that the game assigns the selected ID to active equip slot

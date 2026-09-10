@@ -270,6 +270,7 @@ constexpr std::uintptr_t kHeroWeaponManagerLocalVtableRva = 0x38B59B8;
 constexpr std::uintptr_t kHeroWeaponManagerRemoteVtableRva = 0x38B5B98;
 constexpr std::uintptr_t kSelectWeaponByIdRva = 0x09A5FF0;
 constexpr std::uintptr_t kSelectWeaponAndNotifyRva = 0x09A4110;
+constexpr std::uintptr_t kRefreshWeaponHudStateRva = 0x09A42B0;
 constexpr std::uintptr_t kSetActiveWeaponRva = 0x2161A10;
 constexpr std::uintptr_t kResolveAssetHandleRva = 0x15A0560;
 constexpr std::uintptr_t kResolveHandleRva = 0x16798F0;
@@ -809,6 +810,9 @@ bool ValidateNativeLayout() {
     constexpr std::uint8_t kExpectedNotifyBytes[] = {
         0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x81
     };
+    constexpr std::uint8_t kExpectedHudRefreshBytes[] = {
+        0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20
+    };
     constexpr std::uint8_t kExpectedActiveWeaponSetterBytes[] = {
         0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74,
         0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x30
@@ -826,6 +830,9 @@ bool ValidateNativeLayout() {
                        kExpectedSelectorBytes, sizeof(kExpectedSelectorBytes)) == 0 &&
         std::memcmp(reinterpret_cast<const void*>(module + kSelectWeaponAndNotifyRva),
                     kExpectedNotifyBytes, sizeof(kExpectedNotifyBytes)) == 0 &&
+        std::memcmp(reinterpret_cast<const void*>(module + kRefreshWeaponHudStateRva),
+                    kExpectedHudRefreshBytes,
+                    sizeof(kExpectedHudRefreshBytes)) == 0 &&
         std::memcmp(reinterpret_cast<const void*>(module + kSetActiveWeaponRva),
                     kExpectedActiveWeaponSetterBytes,
                     sizeof(kExpectedActiveWeaponSetterBytes)) == 0 &&
@@ -1124,6 +1131,15 @@ void SelectNativeSlotOnGameThread() {
             reinterpret_cast<SelectWeaponAndNotifyFn>(
                 module + kSelectWeaponAndNotifyRva);
         selectWeaponAndNotify(manager, weaponId);
+
+        // This adjacent HeroWeaponManager virtual is the part that resolves
+        // the selected weapon record and recomputes the three cached HUD state
+        // identifiers at +6E8/+6EC/+6F0. The notification method above does
+        // not update those fields, which leaves Web Shooter red/empty.
+        const auto refreshWeaponHudState =
+            reinterpret_cast<SelectWeaponAndNotifyFn>(
+                module + kRefreshWeaponHudStateRva);
+        refreshWeaponHudState(manager, weaponId);
     }
 
     if (fire || suppressFaces) {
