@@ -1225,7 +1225,12 @@ void Worker() {
         }
 
         if (nativeDirectSelect && g_enabled) {
-            if (Down(config.modifier)) {
+            // Keyboard shortcuts are part of the legacy fallback only. Steam
+            // Input/controller profiles can expose a gamepad chord as Alt+1;
+            // accepting that alongside native XInput queued WebShooter after
+            // ImpactWeb and replaced the selected gadget before the gameplay
+            // reader consumed its fire edge.
+            if (config.keyboardWheelFallback && Down(config.modifier)) {
                 for (int target = 0; target < kGadgetCount; ++target) {
                     if (Pressed(config.slotKeys[target])) {
                         QueueNativeSlot(target, config.nativeDirectFire, false);
