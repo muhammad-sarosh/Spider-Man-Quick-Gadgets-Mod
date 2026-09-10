@@ -49,12 +49,14 @@ ID does not already equal slot 0. QuickGadgets therefore validates the target
 against the live named inventory, assigns those two observed fields on the game
 thread, and only then invokes the wrapper.
 
-Live inspection of a save with five of eight gadgets unlocked produced five
-selectable gadget assets (`WebShooter`, `ImpactWeb`, `SpiderDrone`,
-`ElectricWeb`, and `WebBomb`) plus unrelated `WebBlast` and `PhotoGadget`
-weapon records. `WebBlast` must not be treated as Concussive Blast. Missing
-gadget names are treated as locked/unavailable and are never substituted with
-another weapon ID.
+Live same-process comparison established that the player-facing Web Shooter
+wheel entry is the internal `ImpactWeb` asset, while the player-facing Impact
+Web entry is `WebBlast`. The internal `WebShooter` asset is instead the
+unlimited basic web attack: selecting it as the restore target caused the
+zero/red ammo HUD and shots that never consumed gadget ammo. A save with five
+of eight gadgets unlocked also exposed `SpiderDrone`, `ElectricWeb`, `WebBomb`,
+and the unrelated `PhotoGadget`. Missing gadget names are treated as
+locked/unavailable and are never substituted with another weapon ID.
 
 ## Input action system
 
