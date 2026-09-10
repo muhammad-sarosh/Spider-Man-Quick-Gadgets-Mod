@@ -230,6 +230,8 @@ constexpr std::size_t kWeaponInventoryCountOffset = 0x628;
 constexpr std::size_t kWeaponInventoryHandleOffset = 0x0C;
 constexpr std::size_t kWeaponInventoryIdOffset = 0x10;
 constexpr std::size_t kWeaponAssetNameOffset = 0xB0;
+constexpr std::size_t kActiveWeaponSlot0Offset = 0x6C;
+constexpr std::size_t kGadgetOverrideOffset = 0x790;
 
 constexpr std::uint32_t kActionAttack = 0x2B24146B;
 constexpr std::uint32_t kActionDodge = 0x7CA907FC;
@@ -474,6 +476,18 @@ void SelectNativeSlotOnGameThread() {
     const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
     const auto selectWeaponAndNotify =
         reinterpret_cast<SelectWeaponAndNotifyFn>(module + kSelectWeaponAndNotifyRva);
+
+    // A normal wheel selection assigns both of these fields before invoking
+    // the activation/notification wrapper. The wrapper intentionally skips
+    // its follow-up branch when the requested ID is not already active.
+    const auto managerAddress = reinterpret_cast<std::uintptr_t>(manager);
+    auto* activeSlot0 = reinterpret_cast<std::uint32_t*>(
+        managerAddress + kActiveWeaponSlot0Offset);
+    auto* gadgetOverride = reinterpret_cast<std::uint32_t*>(
+        managerAddress + kGadgetOverrideOffset);
+    const std::uint32_t previousWeaponId = *activeSlot0;
+    *activeSlot0 = weaponId;
+    *gadgetOverride = weaponId;
     selectWeaponAndNotify(manager, weaponId);
 
     if (fire || suppressFaces) {
@@ -493,8 +507,9 @@ void SelectNativeSlotOnGameThread() {
 
     char line[160]{};
     std::snprintf(line, sizeof(line),
-                  "Native selected slot %d (%s, weapon id 0x%08X)%s",
+                  "Native selected slot %d (%s, weapon id 0x%08X, previous 0x%08X)%s",
                   slot + 1, gadgetName ? gadgetName : "<unknown>", weaponId,
+                  previousWeaponId,
                   fire ? " and pulsed UseGadget" : "");
     Log(line);
 }

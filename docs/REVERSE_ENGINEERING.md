@@ -32,6 +32,14 @@ requested gadget by name, and passes that record's ID to the wrapper at
 0x09A4110. This keeps the mapping valid when gadgets are locked or IDs differ
 between sessions.
 
+A live before/after comparison of a normal wheel change from Impact Web to
+Spider Drone showed that the game assigns the selected ID to active equip slot
+0 (manager + 0x6C) and to the gadget override (manager + 0x790). The selection
+wrapper at 0x09A4110 deliberately skips its notification branch when its input
+ID does not already equal slot 0. QuickGadgets therefore validates the target
+against the live named inventory, assigns those two observed fields on the game
+thread, and only then invokes the wrapper.
+
 Live inspection of a save with five of eight gadgets unlocked produced five
 selectable gadget assets (`WebShooter`, `ImpactWeb`, `SpiderDrone`,
 `ElectricWeb`, and `WebBomb`) plus unrelated `WebBlast` and `PhotoGadget`
