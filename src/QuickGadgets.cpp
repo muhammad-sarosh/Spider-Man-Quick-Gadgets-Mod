@@ -212,6 +212,7 @@ std::atomic_bool g_suppressionCallbackQueued = false;
 std::atomic_bool g_physicalUseSuppressedObserved = false;
 std::atomic_bool g_forceUseGadgetPending = false;
 std::atomic_bool g_forceUseGadgetObserved = false;
+std::atomic_bool g_forceUseGadgetDelivered = false;
 std::atomic_ullong g_forceUseGadgetDeadline = 0;
 std::atomic<void*> g_forceUseGadgetContext = nullptr;
 std::atomic_bool g_delayedNativeFirePending = false;
@@ -297,6 +298,18 @@ void* HookedGameplayActionReader(void* owner, void* output, void* actionTable,
                 static_cast<std::size_t>(index) * 0x18;
             const auto action = *reinterpret_cast<const std::uint32_t*>(entry + 0x14);
             if (action == kActionUseGadget) {
+                // A genuine controller tap culminates in 01/00/01/01. The
+                // engine exposes that same state to every active-weapon
+                // consumer during the update. Returning only the fourth bit
+                // from the first query let WebShooter consume the synthetic
+                // input before the selected gadget saw it.
+                if (g_forceUseGadgetPending.load() &&
+                    GetTickCount64() <= g_forceUseGadgetDeadline.load()) {
+                    constexpr std::uint8_t kNativeTapState[4] = { 1, 0, 1, 1 };
+                    std::memcpy(output, kNativeTapState, sizeof(kNativeTapState));
+                    g_forceUseGadgetObserved = true;
+                    g_forceUseGadgetDelivered = true;
+                }
                 std::uint32_t bits = 0;
                 std::memcpy(&bits, output, sizeof(bits));
                 if (bits != 0) {
@@ -389,15 +402,6 @@ bool HookedQueryAction(void* inputContext, std::uint32_t action, float threshold
 
 bool HookedQueryActionWindow(void* inputContext, std::uint32_t action,
                              float minimum, float maximum, bool allowHeld) {
-    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-    const auto returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
-    if (action == kActionUseGadget &&
-        returnAddress == module + kDirectUseGadgetWindowReturnRva &&
-        GetTickCount64() <= g_forceUseGadgetDeadline.load() &&
-        g_forceUseGadgetPending.exchange(false)) {
-        g_forceUseGadgetObserved = true;
-        return true;
-    }
     return g_originalQueryActionWindow
         ? g_originalQueryActionWindow(inputContext, action, minimum, maximum, allowHeld)
         : false;
@@ -752,15 +756,17 @@ void ArmNativeFireOnGameThread() {
         return;
     }
 
-    if (g_queryActionHookInstalled || g_queryActionWindowHookInstalled ||
-        g_queryActionFlagHookInstalled) {
+    if (g_gameplayActionReaderHookInstalled) {
         g_forceUseGadgetContext = inputContext;
-        g_forceUseGadgetDeadline = GetTickCount64() + 250;
+        // Cover every consumer in the current/next gameplay update without
+        // holding the action long enough to become a repeated gadget use.
+        g_forceUseGadgetDeadline = GetTickCount64() + 48;
+        g_forceUseGadgetDelivered = false;
         g_forceUseGadgetPending = true;
     } else {
         TriggerAction(inputContext, kActionUseGadget);
     }
-    Log("Native gadget-use edge armed after equipment transition settled");
+    Log("Native full gadget-use state armed after equipment transition settled");
 }
 
 void* FindHeroWeaponManager(void* hero) {
@@ -1320,7 +1326,11 @@ void Worker() {
         if (g_forceUseGadgetPending &&
             GetTickCount64() > g_forceUseGadgetDeadline.load() &&
             g_forceUseGadgetPending.exchange(false)) {
-            Log("Native UseGadget query window expired before gameplay consumed it");
+            if (g_forceUseGadgetDelivered.exchange(false)) {
+                Log("Native full gadget-use state window completed");
+            } else {
+                Log("Native gadget-use state window expired before gameplay consumed it");
+            }
         }
         const unsigned gameplayActionTrace =
             g_gameplayActionTraceSequence.load();
