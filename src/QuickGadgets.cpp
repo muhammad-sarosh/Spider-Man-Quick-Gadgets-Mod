@@ -254,6 +254,7 @@ constexpr std::uint32_t kActionDodge = 0x7CA907FC;
 constexpr std::uint32_t kActionJump = 0xD69724B0;
 constexpr std::uint32_t kActionWebStrike = 0x775E96E1;
 constexpr std::uint32_t kActionUseGadget = 0x9D43C80F;
+constexpr std::uint32_t kActionGadgetSelect = 0x519ACBBE;
 
 using QueryActionFn = bool (*)(void*, std::uint32_t, float, bool, bool);
 QueryActionFn g_originalQueryAction = nullptr;
@@ -306,7 +307,7 @@ bool HookedQueryActionWindow(void* inputContext, std::uint32_t action,
 bool HookedQueryActionFlag(void* inputContext, std::uint32_t action, bool released) {
     const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
     const auto returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
-    if (action == kActionUseGadget &&
+    if ((action == kActionUseGadget || action == kActionGadgetSelect) &&
         returnAddress == module + kControllerUseGadgetFlagReturnRva) {
         if (GetTickCount64() <= g_forceUseGadgetDeadline.load() &&
             g_forceUseGadgetPending.exchange(false)) {
@@ -316,7 +317,7 @@ bool HookedQueryActionFlag(void* inputContext, std::uint32_t action, bool releas
         // While the shortcut modifier is held, block an ordinary R1
         // Web-Shooter edge so it cannot mask the later gadget projectile.
         // The forced edge above has priority.
-        if (g_controllerModifierHeld.load()) {
+        if (action == kActionUseGadget && g_controllerModifierHeld.load()) {
             g_physicalUseSuppressedObserved = true;
             return false;
         }
@@ -666,7 +667,7 @@ void ArmNativeFireOnGameThread() {
     } else {
         TriggerAction(inputContext, kActionUseGadget);
     }
-    Log("Native UseGadget armed after equipment transition settled");
+    Log("Native gadget-use edge armed after equipment transition settled");
 }
 
 void* FindHeroWeaponManager(void* hero) {
@@ -1212,7 +1213,7 @@ void Worker() {
             g_native.gameMainThreadCall(&ArmNativeFireOnGameThread);
         }
         if (g_forceUseGadgetObserved.exchange(false)) {
-            Log("Native UseGadget gameplay query intercepted");
+            Log("Native gadget-use gameplay query intercepted");
         }
         if (g_physicalUseSuppressedObserved.exchange(false)) {
             Log("Physical R1 Web-Shooter action suppressed while shortcut modifier is held");
