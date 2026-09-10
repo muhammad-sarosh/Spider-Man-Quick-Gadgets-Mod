@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <intrin.h>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -206,6 +207,10 @@ std::atomic_int g_pendingNativeRequest = kNoNativeRequest;
 std::atomic_bool g_controllerComboHeld = false;
 std::atomic_bool g_nativeFireIssuedForCombo = false;
 std::atomic_bool g_suppressionCallbackQueued = false;
+std::atomic_bool g_forceUseGadgetPending = false;
+std::atomic_bool g_forceUseGadgetObserved = false;
+std::atomic_ullong g_forceUseGadgetDeadline = 0;
+std::atomic<void*> g_forceUseGadgetContext = nullptr;
 std::atomic<void*> g_weaponManager = nullptr;
 std::atomic<void*> g_cachedHero = nullptr;
 
@@ -222,6 +227,8 @@ constexpr std::uintptr_t kResolveAssetHandleRva = 0x15A0560;
 constexpr std::uintptr_t kResolveHandleRva = 0x16798F0;
 constexpr std::uintptr_t kConsumeActionRva = 0x09097C0;
 constexpr std::uintptr_t kTriggerActionRva = 0x09098C0;
+constexpr std::uintptr_t kQueryActionRva = 0x0909320;
+constexpr std::uintptr_t kDirectUseGadgetReturnRva = 0x08A2AED;
 constexpr std::size_t kInputContextHandleOffset = 0x78C;
 constexpr std::size_t kWeaponInventoryBase = 0x1A8;
 constexpr std::size_t kWeaponInventoryStride = 0x18;
@@ -237,6 +244,97 @@ constexpr std::uint32_t kActionDodge = 0x7CA907FC;
 constexpr std::uint32_t kActionJump = 0xD69724B0;
 constexpr std::uint32_t kActionWebStrike = 0x775E96E1;
 constexpr std::uint32_t kActionUseGadget = 0x9D43C80F;
+
+using QueryActionFn = bool (*)(void*, std::uint32_t, float, bool, bool);
+QueryActionFn g_originalQueryAction = nullptr;
+void* g_queryActionTrampoline = nullptr;
+std::array<std::uint8_t, 15> g_queryActionOriginalBytes{};
+bool g_queryActionHookInstalled = false;
+
+bool HookedQueryAction(void* inputContext, std::uint32_t action, float threshold,
+                       bool allowHeld, bool useTimeWindow) {
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const auto returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+    if (action == kActionUseGadget &&
+        returnAddress == module + kDirectUseGadgetReturnRva &&
+        inputContext == g_forceUseGadgetContext.load() &&
+        GetTickCount64() <= g_forceUseGadgetDeadline.load() &&
+        g_forceUseGadgetPending.exchange(false)) {
+        g_forceUseGadgetObserved = true;
+        return true;
+    }
+    return g_originalQueryAction
+        ? g_originalQueryAction(inputContext, action, threshold, allowHeld, useTimeWindow)
+        : false;
+}
+
+bool InstallQueryActionHook() {
+    if (g_queryActionHookInstalled) return true;
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    auto* target = reinterpret_cast<std::uint8_t*>(module + kQueryActionRva);
+    constexpr std::uint8_t kExpectedPrologue[] = {
+        0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83,
+        0xEC, 0x30, 0x0F, 0x29, 0x74, 0x24, 0x20
+    };
+    if (std::memcmp(target, kExpectedPrologue, sizeof(kExpectedPrologue)) != 0) {
+        return false;
+    }
+
+    auto* trampoline = static_cast<std::uint8_t*>(VirtualAlloc(
+        nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!trampoline) return false;
+    std::memcpy(g_queryActionOriginalBytes.data(), target,
+                g_queryActionOriginalBytes.size());
+    std::memcpy(trampoline, target, g_queryActionOriginalBytes.size());
+
+    auto writeAbsoluteJump = [](std::uint8_t* address, const void* destination) {
+        address[0] = 0xFF;
+        address[1] = 0x25;
+        *reinterpret_cast<std::uint32_t*>(address + 2) = 0;
+        *reinterpret_cast<std::uintptr_t*>(address + 6) =
+            reinterpret_cast<std::uintptr_t>(destination);
+    };
+    writeAbsoluteJump(trampoline + g_queryActionOriginalBytes.size(),
+                      target + g_queryActionOriginalBytes.size());
+
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(target, g_queryActionOriginalBytes.size(),
+                        PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        return false;
+    }
+    g_queryActionTrampoline = trampoline;
+    g_originalQueryAction = reinterpret_cast<QueryActionFn>(trampoline);
+    writeAbsoluteJump(target, reinterpret_cast<const void*>(&HookedQueryAction));
+    target[14] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), target,
+                          g_queryActionOriginalBytes.size());
+    DWORD ignored = 0;
+    VirtualProtect(target, g_queryActionOriginalBytes.size(), oldProtect, &ignored);
+
+    g_queryActionHookInstalled = true;
+    return true;
+}
+
+void RemoveQueryActionHook() {
+    if (!g_queryActionHookInstalled) return;
+    g_forceUseGadgetPending = false;
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    auto* target = reinterpret_cast<std::uint8_t*>(module + kQueryActionRva);
+    DWORD oldProtect = 0;
+    if (VirtualProtect(target, g_queryActionOriginalBytes.size(),
+                       PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        std::memcpy(target, g_queryActionOriginalBytes.data(),
+                    g_queryActionOriginalBytes.size());
+        FlushInstructionCache(GetCurrentProcess(), target,
+                              g_queryActionOriginalBytes.size());
+        DWORD ignored = 0;
+        VirtualProtect(target, g_queryActionOriginalBytes.size(), oldProtect, &ignored);
+    }
+    // Do not free the trampoline here: an engine thread may have entered it
+    // immediately before restoration. The allocation is reclaimed at process exit.
+    g_queryActionHookInstalled = false;
+}
 
 bool ValidateNativeLayout() {
     const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
@@ -509,7 +607,13 @@ void SelectNativeSlotOnGameThread() {
             if (suppressFaces) SuppressFaceActions(inputContext);
             if (fire) {
                 g_nativeFireIssuedForCombo = true;
-                TriggerAction(inputContext, kActionUseGadget);
+                if (g_queryActionHookInstalled) {
+                    g_forceUseGadgetContext = inputContext;
+                    g_forceUseGadgetDeadline = GetTickCount64() + 250;
+                    g_forceUseGadgetPending = true;
+                } else {
+                    TriggerAction(inputContext, kActionUseGadget);
+                }
             }
         }
     }
@@ -829,6 +933,13 @@ void Worker() {
             Log("Native direct select disabled: Spider-Man.exe layout does not match 4.0630.0.0");
         } else {
             Log("Native direct select armed for Spider-Man.exe 4.0630.0.0");
+            if (g_config.nativeDirectFire) {
+                if (InstallQueryActionHook()) {
+                    Log("Native UseGadget gameplay query hook armed");
+                } else {
+                    Log("Native UseGadget query hook unavailable; using action-state fallback");
+                }
+            }
         }
     }
     if (nativeProbe) {
@@ -851,6 +962,15 @@ void Worker() {
     int activeControllerIndex = -1;
 
     while (g_running) {
+        if (g_forceUseGadgetObserved.exchange(false)) {
+            Log("Native UseGadget gameplay query intercepted");
+        }
+        if (g_forceUseGadgetPending &&
+            GetTickCount64() > g_forceUseGadgetDeadline.load() &&
+            g_forceUseGadgetPending.exchange(false)) {
+            Log("Native UseGadget query window expired before gameplay consumed it");
+        }
+
         Config config;
         {
             std::lock_guard lock(g_configMutex);
@@ -1001,7 +1121,10 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         DisableThreadLibraryCalls(module);
         StartWorker();
     }
-    if (reason == DLL_PROCESS_DETACH) g_running = false;
+    if (reason == DLL_PROCESS_DETACH) {
+        g_running = false;
+        RemoveQueryActionHook();
+    }
     return TRUE;
 }
 
