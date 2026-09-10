@@ -1,15 +1,16 @@
 # Quick Gadgets for Marvel's Spider-Man Remastered
 
-Quick Gadgets is an experimental Spider-Man 2-style direct-gadget mod. The
-current development build attaches to the game and probes the live hero's
-gadget components through Script Hook. The native route is the target for
-controller support.
+Quick Gadgets is an experimental Spider-Man 2-style direct-gadget mod for
+Marvel's Spider-Man Remastered 4.0630.0.0. It finds the live
+HeroWeaponManager, resolves the weapon ID in the requested wheel slot, calls
+the game's own selection routine, and can pulse the native UseGadget action.
+The native controller route does not synthesize keyboard input.
 
 The old keyboard-wheel implementation is retained only as an opt-in diagnostic
 fallback. It sends synthetic `[`, `]`, and `E` keystrokes, is focus-sensitive,
 and is disabled by default because it is not suitable for controller play.
 
-## Optional keyboard fallback controls
+## Current controls
 
 | Shortcut | Gadget |
 | --- | --- |
@@ -23,26 +24,35 @@ and is disabled by default because it is not suitable for controller play.
 | `Alt + 7` | Concussive Blast |
 | `Alt + 8` | Suspension Matrix |
 
-`F10` enables or disables the mod. Enable this path with
-`KeyboardWheelFallback=1` in `QuickGadgets.ini` only when testing with a
-focused keyboard-and-mouse game window.
+Alt + 1 through Alt + 8 use the native selector and native fire pulse when
+NativeDirectSelect and NativeDirectFire are enabled. These are physical test
+triggers only; the mod does not send those keys to the game.
+
+On an XInput-compatible controller, hold RB/R1 and press a face button. The
+default slot mapping is configurable in the Controller section:
+
+- A/Cross: slot 5 (Web Bomb)
+- B/Circle: slot 4 (Electric Web)
+- X/Square: slot 2 (Impact Web)
+- Y/Triangle: slot 3 (Spider Drone)
+
+F10 enables or disables the mod.
 
 ## Install
 
 1. Install the current community **Spider-Man PC Script Hook** for the exact
    version of your game.
-2. If you enable the optional keyboard fallback, assign unique keyboard
-   bindings for **Previous Gadget**, **Next Gadget**, and **Use Gadget**. The
-   defaults in this project expect `[`, `]`, and `E`.
-3. Build the `package` CMake target. Copy `QuickGadgets.script` and
-   `QuickGadgets.ini` into the game’s `scripts` folder.
-4. Launch the game through the Script Hook/community loader.
+2. Build the package CMake target. Copy QuickGadgets.script and
+   QuickGadgets.ini into the game's scripts folder.
+3. Launch the game through the Script Hook/community loader.
 
-The current development build runs a read-only native probe after attach. Once
-a save is loaded, findings are written to `QuickGadgets.log` beside the DLL and
-include the live hero component list. This confirms which gadget-control
-objects and vtables are available before calling any internal direct-fire
-routine; it does not change gameplay by itself. The probe is now opt-in:
+Only the optional KeyboardWheelFallback needs the game's Previous Gadget,
+Next Gadget, and Use Gadget keyboard bindings. Leave that fallback disabled
+for native/controller use.
+
+The development build can run a read-only native probe after attach. Once a
+save is loaded, findings are written to QuickGadgets.log beside the DLL. The
+probe is opt-in:
 NativeProbe=1 is required, because some Script Hook builds can crash while
 enumerating components. Leave it at 0 for normal play. When diagnosing, set
 NativeProbeLevel from 1 through 5 to add one operation at a time: hero pointer,
@@ -54,8 +64,10 @@ Edit `QuickGadgets.ini` beside the script before launching the game. Values are
 Windows virtual-key codes; common examples are `18` for Alt, `16` for Shift,
 `17` for Ctrl, and `49` through `56` for `1` through `8`.
 
-`KeyboardWheelFallback=0` is the default and is the correct setting for the
-native/controller route. Set it to `1` only for the legacy keyboard test.
+KeyboardWheelFallback=0 is the default and is the correct setting for the
+native/controller route. Set it to 1 only for the legacy keyboard test.
+NativeDirectFire=0 keeps native selection but disables the experimental fire
+pulse, which is useful for isolating a problem.
 
 The wheel order is the default Remastered order. If a mod changes that order,
 reassign the `Slot1`...`Slot8` key values to match its actual order.
@@ -64,34 +76,14 @@ When enabled, the legacy fallback anchors the game to the first wheel slot by
 sending several Previous Gadget pulses, then advances to the requested gadget
 and fires it. This path is intentionally stateless but remains keyboard-only.
 
-`RestoreWebShooter=1` is enabled by default and makes the mod return to Web
-Shooter after every non-web gadget use, matching Spider-Man 2’s non-persistent
-quick-fire behaviour. Set it to `0` if you want the selected gadget to remain
-active after firing.
+RestoreWebShooter currently applies only to the legacy wheel fallback. Native
+auto-restore is intentionally deferred until direct selection and firing have
+been validated in-game.
 
-## Using a controller through Steam Input
-
-The DLL cannot safely consume an XInput face-button event by itself: polling it
-would also let Square/Cross/etc. reach the game as attack or dodge. Use a Steam
-Input layout that emits keyboard keys instead:
-
-1. Map the controller’s R1 to the mod’s modifier key (`Left Alt`, virtual-key
-   `18`).
-2. Map Square, Triangle, Circle, and Cross to four unused keyboard keys, for
-   example `1`, `2`, `3`, and `4`.
-3. Keep those face buttons as keyboard outputs only; do not also bind them as
-   gamepad buttons in the same layout.
-4. The resulting controls are `R1 + Square = Alt + 1`, `R1 + Triangle = Alt + 2`,
-   `R1 + Circle = Alt + 3`, and `R1 + Cross = Alt + 4`.
-
-This is a keyboard translation layer, not native XInput interception. It keeps
-the original controller actions from leaking into combat while using the same
-tested DLL path.
-
-Native controller interception is still being investigated. The game has no
-user-facing Previous/Next Gadget buttons on a controller, so the eventual
-Spider-Man 2-style implementation must call the hero gadget component directly
-instead of relying on those keyboard actions.
+The native controller path clears Attack, Dodge, Jump, and Web Strike through
+the engine action system during the gadget pulse. This is an experimental
+first pass at preventing face-button leakage; it does not remap the controller
+through Steam Input.
 
 ## Build
 
@@ -106,6 +98,9 @@ The package is written to `build/package/QuickGadgets.script`.
 
 ## Validation plan
 
-Test each gadget after it is unlocked, then test after manually changing the
-wheel selection. If a game configuration has more than eight entries, increase
-`AnchorPreviousPulses` so it reliably reaches Web Shooter before advancing.
+Start with an unlocked slot and verify selection plus firing. If the game
+crashes or only selection works, set NativeDirectFire=0 and repeat. Then test
+the four controller combinations and note whether the normal face-button
+action also occurs. Finally, manually change the wheel selection and repeat;
+the native route addresses slots directly and should not depend on current
+wheel state.

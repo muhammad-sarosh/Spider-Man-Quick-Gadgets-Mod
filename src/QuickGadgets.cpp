@@ -47,6 +47,7 @@ struct Config {
     bool restoreWebShooter = false;
     bool keyboardWheelFallback = false;
     bool nativeDirectSelect = true;
+    bool nativeDirectFire = true;
     bool controllerEnabled = true;
     std::array<int, 4> controllerSlots{ 4, 3, 1, 2 }; // A, B, X, Y; zero-based.
     bool nativeProbe = false;
@@ -193,6 +194,10 @@ std::atomic_bool g_probeFinished = false;
 std::atomic_bool g_probeLoggedHero = false;
 std::atomic_int g_nativeProbeLevel = 1;
 std::atomic_int g_pendingNativeSlot = -1;
+std::atomic_bool g_pendingNativeFire = false;
+std::atomic_bool g_pendingSuppressFaces = false;
+std::atomic_bool g_nativeUseReleasePending = false;
+std::atomic_ullong g_nativeUseReleaseAt = 0;
 std::atomic<void*> g_weaponManager = nullptr;
 std::atomic<void*> g_cachedHero = nullptr;
 
@@ -204,8 +209,18 @@ constexpr std::uintptr_t kHeroWeaponManagerVtableRva = 0x38B55C8;
 constexpr std::uintptr_t kHeroWeaponManagerLocalVtableRva = 0x38B59B8;
 constexpr std::uintptr_t kHeroWeaponManagerRemoteVtableRva = 0x38B5B98;
 constexpr std::uintptr_t kSelectWeaponByIdRva = 0x09A5FF0;
+constexpr std::uintptr_t kSelectWeaponAndNotifyRva = 0x09A4110;
+constexpr std::uintptr_t kResolveHandleRva = 0x16798F0;
+constexpr std::uintptr_t kSetActionValueRva = 0x09098C0;
 constexpr std::size_t kWeaponSlotBase = 0x6C;
 constexpr std::size_t kWeaponSlotStride = 0x28;
+constexpr std::size_t kInputContextHandleOffset = 0x78C;
+
+constexpr std::uint32_t kActionAttack = 0x2B24146B;
+constexpr std::uint32_t kActionDodge = 0x7CA907FC;
+constexpr std::uint32_t kActionJump = 0xD69724B0;
+constexpr std::uint32_t kActionWebStrike = 0x775E96E1;
+constexpr std::uint32_t kActionUseGadget = 0x9D43C80F;
 
 bool ValidateNativeLayout() {
     const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
@@ -213,8 +228,48 @@ bool ValidateNativeLayout() {
     constexpr std::uint8_t kExpectedSelectorBytes[] = {
         0x85, 0xD2, 0x0F, 0x84, 0x0C, 0x01, 0x00, 0x00
     };
+    constexpr std::uint8_t kExpectedNotifyBytes[] = {
+        0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x81
+    };
+    constexpr std::uint8_t kExpectedResolverBytes[] = {
+        0x8B, 0x11, 0x8B, 0xCA, 0xC1, 0xE9, 0x14, 0x85
+    };
+    constexpr std::uint8_t kExpectedActionSetterBytes[] = {
+        0x85, 0xD2, 0x0F, 0x84, 0xA0, 0x00, 0x00, 0x00
+    };
     return std::memcmp(reinterpret_cast<const void*>(module + kSelectWeaponByIdRva),
-                       kExpectedSelectorBytes, sizeof(kExpectedSelectorBytes)) == 0;
+                       kExpectedSelectorBytes, sizeof(kExpectedSelectorBytes)) == 0 &&
+        std::memcmp(reinterpret_cast<const void*>(module + kSelectWeaponAndNotifyRva),
+                    kExpectedNotifyBytes, sizeof(kExpectedNotifyBytes)) == 0 &&
+        std::memcmp(reinterpret_cast<const void*>(module + kResolveHandleRva),
+                    kExpectedResolverBytes, sizeof(kExpectedResolverBytes)) == 0 &&
+        std::memcmp(reinterpret_cast<const void*>(module + kSetActionValueRva),
+                    kExpectedActionSetterBytes, sizeof(kExpectedActionSetterBytes)) == 0;
+}
+
+void* ResolveInputContext(void* manager) {
+    if (!manager) return nullptr;
+    using ResolveHandleFn = void* (*)(void*);
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const auto resolveHandle = reinterpret_cast<ResolveHandleFn>(module + kResolveHandleRva);
+    return resolveHandle(reinterpret_cast<void*>(
+        reinterpret_cast<std::uintptr_t>(manager) + kInputContextHandleOffset));
+}
+
+void SetActionValue(void* inputContext, std::uint32_t action, float value) {
+    if (!inputContext) return;
+    using SetActionValueFn = void (*)(void*, std::uint32_t, float);
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const auto setActionValue =
+        reinterpret_cast<SetActionValueFn>(module + kSetActionValueRva);
+    setActionValue(inputContext, action, value);
+}
+
+void SuppressFaceActions(void* inputContext) {
+    SetActionValue(inputContext, kActionAttack, 0.0f);
+    SetActionValue(inputContext, kActionDodge, 0.0f);
+    SetActionValue(inputContext, kActionJump, 0.0f);
+    SetActionValue(inputContext, kActionWebStrike, 0.0f);
 }
 
 void* FindHeroWeaponManager(void* hero) {
@@ -271,11 +326,27 @@ void SelectNativeSlotOnGameThread() {
         return;
     }
 
-    using SelectWeaponByIdFn = void (*)(void*, std::uint32_t);
+    using SelectWeaponAndNotifyFn = void (*)(void*, std::uint32_t);
     const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-    const auto selectWeapon =
-        reinterpret_cast<SelectWeaponByIdFn>(module + kSelectWeaponByIdRva);
-    selectWeapon(manager, weaponId);
+    const auto selectWeaponAndNotify =
+        reinterpret_cast<SelectWeaponAndNotifyFn>(module + kSelectWeaponAndNotifyRva);
+    selectWeaponAndNotify(manager, weaponId);
+
+    const bool suppressFaces = g_pendingSuppressFaces.exchange(false);
+    const bool fire = g_pendingNativeFire.exchange(false);
+    if (fire || suppressFaces) {
+        void* inputContext = ResolveInputContext(manager);
+        if (!inputContext) {
+            Log("Native fire failed: input action context was not available");
+        } else {
+            if (suppressFaces) SuppressFaceActions(inputContext);
+            if (fire) {
+                SetActionValue(inputContext, kActionUseGadget, 1.0f);
+                g_nativeUseReleaseAt = GetTickCount64() + 34;
+                g_nativeUseReleasePending = true;
+            }
+        }
+    }
 
     char line[160]{};
     std::snprintf(line, sizeof(line), "Native selected slot %d (weapon id 0x%08X)",
@@ -283,12 +354,23 @@ void SelectNativeSlotOnGameThread() {
     Log(line);
 }
 
-bool QueueNativeSlot(int slot) {
+void ReleaseNativeUseOnGameThread() {
+    if (!g_native.getPlayerHero) return;
+    void* manager = FindHeroWeaponManager(g_native.getPlayerHero());
+    void* inputContext = ResolveInputContext(manager);
+    if (!inputContext) return;
+    SetActionValue(inputContext, kActionUseGadget, 0.0f);
+    SuppressFaceActions(inputContext);
+}
+
+bool QueueNativeSlot(int slot, bool fire, bool suppressFaces) {
     int expected = -1;
     if (!g_native.gameMainThreadCall ||
         !g_pendingNativeSlot.compare_exchange_strong(expected, slot)) {
         return false;
     }
+    g_pendingNativeFire = fire;
+    g_pendingSuppressFaces = suppressFaces;
     g_native.gameMainThreadCall(&SelectNativeSlotOnGameThread);
     return true;
 }
@@ -307,6 +389,9 @@ struct XInputState {
     DWORD packetNumber;
     XInputGamepad gamepad;
 };
+
+static_assert(sizeof(XInputGamepad) == 12);
+static_assert(sizeof(XInputState) == 16);
 
 using XInputGetStateFn = DWORD (WINAPI*)(DWORD, XInputState*);
 
@@ -490,6 +575,7 @@ Config LoadConfig() {
     config.restoreWebShooter = ReadBool(L"QuickGadgets", L"RestoreWebShooter", config.restoreWebShooter, path);
     config.keyboardWheelFallback = ReadBool(L"QuickGadgets", L"KeyboardWheelFallback", config.keyboardWheelFallback, path);
     config.nativeDirectSelect = ReadBool(L"QuickGadgets", L"NativeDirectSelect", config.nativeDirectSelect, path);
+    config.nativeDirectFire = ReadBool(L"QuickGadgets", L"NativeDirectFire", config.nativeDirectFire, path);
     config.controllerEnabled = ReadBool(L"Controller", L"Enabled", config.controllerEnabled, path);
     config.controllerSlots[0] = std::clamp(ReadInt(L"Controller", L"A", config.controllerSlots[0] + 1, path) - 1, 0, 7);
     config.controllerSlots[1] = std::clamp(ReadInt(L"Controller", L"B", config.controllerSlots[1] + 1, path) - 1, 0, 7);
@@ -594,7 +680,7 @@ void Worker() {
             if (Down(config.modifier)) {
                 for (int target = 0; target < kGadgetCount; ++target) {
                     if (Pressed(config.slotKeys[target])) {
-                        QueueNativeSlot(target);
+                        QueueNativeSlot(target, config.nativeDirectFire, false);
                         break;
                     }
                 }
@@ -610,13 +696,22 @@ void Worker() {
                         for (int face = 0; face < 4; ++face) {
                             if ((buttons & kFaces[face]) &&
                                 !(previousControllerButtons & kFaces[face])) {
-                                QueueNativeSlot(config.controllerSlots[face]);
+                                QueueNativeSlot(config.controllerSlots[face],
+                                                config.nativeDirectFire, true);
                                 break;
                             }
                         }
                     }
                     previousControllerButtons = buttons;
                 }
+            }
+        }
+
+        if (g_nativeUseReleasePending &&
+            GetTickCount64() >= g_nativeUseReleaseAt.load()) {
+            if (g_nativeUseReleasePending.exchange(false) &&
+                g_native.gameMainThreadCall) {
+                g_native.gameMainThreadCall(&ReleaseNativeUseOnGameThread);
             }
         }
 
