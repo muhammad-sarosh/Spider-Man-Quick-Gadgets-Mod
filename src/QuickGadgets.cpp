@@ -220,11 +220,16 @@ constexpr std::uintptr_t kHeroWeaponManagerLocalVtableRva = 0x38B59B8;
 constexpr std::uintptr_t kHeroWeaponManagerRemoteVtableRva = 0x38B5B98;
 constexpr std::uintptr_t kSelectWeaponByIdRva = 0x09A5FF0;
 constexpr std::uintptr_t kSelectWeaponAndNotifyRva = 0x09A4110;
+constexpr std::uintptr_t kResolveAssetHandleRva = 0x15A0560;
 constexpr std::uintptr_t kResolveHandleRva = 0x16798F0;
 constexpr std::uintptr_t kSetActionValueRva = 0x09098C0;
-constexpr std::size_t kWeaponSlotBase = 0x6C;
-constexpr std::size_t kWeaponSlotStride = 0x28;
 constexpr std::size_t kInputContextHandleOffset = 0x78C;
+constexpr std::size_t kWeaponInventoryBase = 0x1A8;
+constexpr std::size_t kWeaponInventoryStride = 0x18;
+constexpr std::size_t kWeaponInventoryCountOffset = 0x628;
+constexpr std::size_t kWeaponInventoryHandleOffset = 0x0C;
+constexpr std::size_t kWeaponInventoryIdOffset = 0x10;
+constexpr std::size_t kWeaponAssetNameOffset = 0xB0;
 
 constexpr std::uint32_t kActionAttack = 0x2B24146B;
 constexpr std::uint32_t kActionDodge = 0x7CA907FC;
@@ -244,6 +249,9 @@ bool ValidateNativeLayout() {
     constexpr std::uint8_t kExpectedResolverBytes[] = {
         0x8B, 0x11, 0x8B, 0xCA, 0xC1, 0xE9, 0x14, 0x85
     };
+    constexpr std::uint8_t kExpectedAssetResolverBytes[] = {
+        0x44, 0x8B, 0x01, 0x41, 0x8B, 0xD0, 0xC1, 0xEA
+    };
     constexpr std::uint8_t kExpectedActionSetterBytes[] = {
         0x85, 0xD2, 0x0F, 0x84, 0xA0, 0x00, 0x00, 0x00
     };
@@ -253,8 +261,55 @@ bool ValidateNativeLayout() {
                     kExpectedNotifyBytes, sizeof(kExpectedNotifyBytes)) == 0 &&
         std::memcmp(reinterpret_cast<const void*>(module + kResolveHandleRva),
                     kExpectedResolverBytes, sizeof(kExpectedResolverBytes)) == 0 &&
+        std::memcmp(reinterpret_cast<const void*>(module + kResolveAssetHandleRva),
+                    kExpectedAssetResolverBytes, sizeof(kExpectedAssetResolverBytes)) == 0 &&
         std::memcmp(reinterpret_cast<const void*>(module + kSetActionValueRva),
                     kExpectedActionSetterBytes, sizeof(kExpectedActionSetterBytes)) == 0;
+}
+
+const char* ResolveWeaponAssetName(std::uintptr_t inventoryEntry) {
+    using ResolveAssetHandleFn = void* (*)(void*);
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const auto resolveAssetHandle =
+        reinterpret_cast<ResolveAssetHandleFn>(module + kResolveAssetHandleRva);
+    void* asset = resolveAssetHandle(reinterpret_cast<void*>(
+        inventoryEntry + kWeaponInventoryHandleOffset));
+    if (!asset) return nullptr;
+    return *reinterpret_cast<const char* const*>(
+        reinterpret_cast<std::uintptr_t>(asset) + kWeaponAssetNameOffset);
+}
+
+std::uint32_t FindGadgetWeaponId(void* manager, int slot, const char** matchedName) {
+    if (!manager || slot < 0 || slot >= kGadgetCount) return 0;
+    constexpr std::array<std::array<const char*, 3>, kGadgetCount> kNames{{
+        {{"WebShooter", nullptr, nullptr}},
+        {{"ImpactWeb", nullptr, nullptr}},
+        {{"SpiderDrone", nullptr, nullptr}},
+        {{"ElectricWeb", nullptr, nullptr}},
+        {{"WebBomb", nullptr, nullptr}},
+        {{"TripMine", "WebTripMine", "GadgetTripmine"}},
+        {{"ShockerBlast", "ConcussiveBlast", "GadgetBlast"}},
+        {{"AirLauncher", "SuspensionMatrix", "GadgetMatrix"}},
+    }};
+
+    const auto base = reinterpret_cast<std::uintptr_t>(manager);
+    const auto count = *reinterpret_cast<const std::uint32_t*>(
+        base + kWeaponInventoryCountOffset);
+    if (count > 256) return 0;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto entry = base + kWeaponInventoryBase +
+            static_cast<std::size_t>(index) * kWeaponInventoryStride;
+        const char* name = ResolveWeaponAssetName(entry);
+        if (!name) continue;
+        for (const char* candidate : kNames[slot]) {
+            if (candidate && _stricmp(name, candidate) == 0) {
+                if (matchedName) *matchedName = name;
+                return *reinterpret_cast<const std::uint32_t*>(
+                    entry + kWeaponInventoryIdOffset);
+            }
+        }
+    }
+    return 0;
 }
 
 void* ResolveInputContext(void* manager) {
@@ -320,7 +375,8 @@ void LogGadgetLayout(void* hero, void* manager) {
     if (!hero || !manager || g_gadgetLayoutLogged.exchange(true)) return;
 
     const auto base = reinterpret_cast<std::uintptr_t>(manager);
-    const auto inventoryCount = *reinterpret_cast<const std::uint32_t*>(base + 0x628);
+    const auto inventoryCount = *reinterpret_cast<const std::uint32_t*>(
+        base + kWeaponInventoryCountOffset);
     char line[256]{};
     std::snprintf(line, sizeof(line),
                   "HeroWeaponManager active equip ids: %08X %08X %08X; inventory count: %u",
@@ -332,10 +388,12 @@ void LogGadgetLayout(void* hero, void* manager) {
 
     if (inventoryCount <= 256) {
         for (std::uint32_t index = 0; index < inventoryCount; ++index) {
-            const auto entry = base + 0x1A8 + static_cast<std::size_t>(index) * 0x18;
+            const auto entry = base + kWeaponInventoryBase +
+                static_cast<std::size_t>(index) * kWeaponInventoryStride;
             const auto field0 = *reinterpret_cast<const std::uint64_t*>(entry);
             const auto field8 = *reinterpret_cast<const std::uint64_t*>(entry + 8);
-            const auto weaponId = *reinterpret_cast<const std::uint32_t*>(entry + 0x10);
+            const auto weaponId = *reinterpret_cast<const std::uint32_t*>(
+                entry + kWeaponInventoryIdOffset);
             const auto field14 = *reinterpret_cast<const std::uint32_t*>(entry + 0x14);
             std::snprintf(line, sizeof(line),
                           "Weapon inventory[%03u]: %016llX %016llX id=%08X tail=%08X",
@@ -401,10 +459,43 @@ void SelectNativeSlotOnGameThread() {
         LogGadgetLayout(g_native.getPlayerHero(), manager);
     }
 
+    const char* gadgetName = nullptr;
+    const std::uint32_t weaponId = FindGadgetWeaponId(manager, slot, &gadgetName);
+    if (!weaponId) {
+        char line[160]{};
+        std::snprintf(line, sizeof(line),
+                      "Gadget slot %d is not present in the loaded weapon inventory",
+                      slot + 1);
+        Log(line);
+        return;
+    }
+
+    using SelectWeaponAndNotifyFn = void (*)(void*, std::uint32_t);
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const auto selectWeaponAndNotify =
+        reinterpret_cast<SelectWeaponAndNotifyFn>(module + kSelectWeaponAndNotifyRva);
+    selectWeaponAndNotify(manager, weaponId);
+
+    if (fire || suppressFaces) {
+        void* inputContext = ResolveInputContext(manager);
+        if (!inputContext) {
+            Log("Native fire failed: input action context was not available");
+        } else {
+            if (suppressFaces) SuppressFaceActions(inputContext);
+            if (fire) {
+                g_nativeFirePulseActive = true;
+                SetActionValue(inputContext, kActionUseGadget, 1.0f);
+                g_nativeUseReleaseAt = GetTickCount64() + 34;
+                g_nativeUseReleasePending = true;
+            }
+        }
+    }
+
     char line[160]{};
     std::snprintf(line, sizeof(line),
-                  "Native gadget request %d captured; direct selector disabled pending layout mapping (fire=%d suppress=%d)",
-                  slot + 1, fire ? 1 : 0, suppressFaces ? 1 : 0);
+                  "Native selected slot %d (%s, weapon id 0x%08X)%s",
+                  slot + 1, gadgetName ? gadgetName : "<unknown>", weaponId,
+                  fire ? " and pulsed UseGadget" : "");
     Log(line);
 }
 

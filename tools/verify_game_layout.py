@@ -15,9 +15,9 @@ IMAGE_BASE = 0x140000000
 EXPECTED_BYTES = {
     0x09A5FF0: bytes.fromhex("85 D2 0F 84 0C 01 00 00"),
     0x09A4110: bytes.fromhex("48 89 5C 24 08 57 48 81"),
+    0x15A0560: bytes.fromhex("44 8B 01 41 8B D0 C1 EA"),
     0x16798F0: bytes.fromhex("8B 11 8B CA C1 E9 14 85"),
     0x09098C0: bytes.fromhex("85 D2 0F 84 A0 00 00 00"),
-    0x21634F0: bytes.fromhex("8B C2 48 8D 14 80 8B 44 D1 6C C3"),
 }
 
 EXPECTED_VTABLE_ENTRIES = {

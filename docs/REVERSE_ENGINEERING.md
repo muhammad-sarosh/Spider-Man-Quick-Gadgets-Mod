@@ -15,16 +15,29 @@ of these routines are called.
 - Base vtable RVA: 0x38B55C8
 - Local vtable RVA: 0x38B59B8
 - Remote vtable RVA: 0x38B5B98
-- Weapon slot table: manager + 0x6C, stride 0x28, eight slots
+- Active equip-slot table: manager + 0x6C, stride 0x28, three slots (not the gadget wheel)
+- Loaded weapon inventory: manager + 0x1A8, stride 0x18, count at +0x628
+- Inventory asset handle: entry + 0x0C; weapon ID: entry + 0x10
+- Asset-handle resolver: RVA 0x15A0560; resolved asset name: asset + 0xB0
 - Get weapon ID by slot: RVA 0x21634F0
 - Resolve weapon record by ID: RVA 0x21633C0
 - Low-level active weapon setter: RVA 0x09A5FF0
 - Selection wrapper with normal notification/activation work: RVA 0x09A4110
 
-The slot getter computes manager + 0x6C + slot * 0x28 and returns the 32-bit
-weapon ID. The low-level setter resolves that ID and deactivates the previous
-weapon before activating the new record. QuickGadgets uses the wrapper at
-0x09A4110 because it performs the setter plus the normal follow-up work.
+The slot getter computes manager + 0x6C + slot * 0x28 and returns a 32-bit
+weapon ID, but live inspection proved this table contains only three general
+active-equip slots. It is not the eight-entry gadget wheel. QuickGadgets now
+scans the loaded weapon inventory, resolves each asset name, matches the
+requested gadget by name, and passes that record's ID to the wrapper at
+0x09A4110. This keeps the mapping valid when gadgets are locked or IDs differ
+between sessions.
+
+Live inspection of a save with five of eight gadgets unlocked produced five
+selectable gadget assets (`WebShooter`, `ImpactWeb`, `SpiderDrone`,
+`ElectricWeb`, and `WebBomb`) plus unrelated `WebBlast` and `PhotoGadget`
+weapon records. `WebBlast` must not be treated as Concussive Blast. Missing
+gadget names are treated as locked/unavailable and are never substituted with
+another weapon ID.
 
 ## Input action system
 
