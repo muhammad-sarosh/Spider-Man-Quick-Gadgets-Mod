@@ -243,6 +243,7 @@ constexpr std::uintptr_t kQueryActionWindowRva = 0x09095E0;
 constexpr std::uintptr_t kDirectUseGadgetWindowReturnRva = 0x0E3D0CE;
 constexpr std::uintptr_t kQueryActionFlagRva = 0x0909520;
 constexpr std::uintptr_t kControllerUseGadgetFlagReturnRva = 0x07943AC;
+constexpr std::uintptr_t kGameplayActionReaderRva = 0x0E3CF80;
 constexpr std::size_t kInputContextHandleOffset = 0x78C;
 constexpr std::size_t kWeaponInventoryBase = 0x1A8;
 constexpr std::size_t kWeaponInventoryStride = 0x18;
@@ -275,6 +276,109 @@ QueryActionFlagFn g_originalQueryActionFlag = nullptr;
 void* g_queryActionFlagTrampoline = nullptr;
 std::array<std::uint8_t, 17> g_queryActionFlagOriginalBytes{};
 bool g_queryActionFlagHookInstalled = false;
+std::atomic_uint g_gameplayActionTraceSequence = 0;
+std::atomic_uint g_gameplayActionTraceBits = 0;
+using GameplayActionReaderFn = void* (*)(void*, void*, void*, float, void*);
+GameplayActionReaderFn g_originalGameplayActionReader = nullptr;
+void* g_gameplayActionReaderTrampoline = nullptr;
+std::array<std::uint8_t, 15> g_gameplayActionReaderOriginalBytes{};
+bool g_gameplayActionReaderHookInstalled = false;
+
+void* HookedGameplayActionReader(void* owner, void* output, void* actionTable,
+                                 float threshold, void* selector) {
+    void* result = g_originalGameplayActionReader
+        ? g_originalGameplayActionReader(owner, output, actionTable, threshold, selector)
+        : output;
+    if (output && actionTable && selector) {
+        const int index = *reinterpret_cast<const int*>(
+            reinterpret_cast<const std::uint8_t*>(selector) + 8);
+        if (index >= 0 && index < 256) {
+            const auto entry = reinterpret_cast<const std::uint8_t*>(actionTable) +
+                static_cast<std::size_t>(index) * 0x18;
+            const auto action = *reinterpret_cast<const std::uint32_t*>(entry + 0x14);
+            if (action == kActionUseGadget) {
+                std::uint32_t bits = 0;
+                std::memcpy(&bits, output, sizeof(bits));
+                if (bits != 0) {
+                    g_gameplayActionTraceBits = bits;
+                    g_gameplayActionTraceSequence.fetch_add(1);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+bool InstallGameplayActionReaderHook() {
+    if (g_gameplayActionReaderHookInstalled) return true;
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    auto* target = reinterpret_cast<std::uint8_t*>(
+        module + kGameplayActionReaderRva);
+    constexpr std::uint8_t kExpectedPrologue[] = {
+        0x48, 0x89, 0x5C, 0x24, 0x08,
+        0x48, 0x89, 0x6C, 0x24, 0x10,
+        0x48, 0x89, 0x74, 0x24, 0x18
+    };
+    if (std::memcmp(target, kExpectedPrologue, sizeof(kExpectedPrologue)) != 0) {
+        return false;
+    }
+    auto* trampoline = static_cast<std::uint8_t*>(VirtualAlloc(
+        nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!trampoline) return false;
+    std::memcpy(g_gameplayActionReaderOriginalBytes.data(), target,
+                g_gameplayActionReaderOriginalBytes.size());
+    std::memcpy(trampoline, target, g_gameplayActionReaderOriginalBytes.size());
+    auto writeAbsoluteJump = [](std::uint8_t* address, const void* destination) {
+        address[0] = 0xFF;
+        address[1] = 0x25;
+        *reinterpret_cast<std::uint32_t*>(address + 2) = 0;
+        *reinterpret_cast<std::uintptr_t*>(address + 6) =
+            reinterpret_cast<std::uintptr_t>(destination);
+    };
+    writeAbsoluteJump(trampoline + g_gameplayActionReaderOriginalBytes.size(),
+                      target + g_gameplayActionReaderOriginalBytes.size());
+    g_gameplayActionReaderTrampoline = trampoline;
+    g_originalGameplayActionReader =
+        reinterpret_cast<GameplayActionReaderFn>(trampoline);
+
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(target, g_gameplayActionReaderOriginalBytes.size(),
+                        PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        g_gameplayActionReaderTrampoline = nullptr;
+        g_originalGameplayActionReader = nullptr;
+        return false;
+    }
+    writeAbsoluteJump(target,
+                      reinterpret_cast<const void*>(&HookedGameplayActionReader));
+    target[14] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), target,
+                          g_gameplayActionReaderOriginalBytes.size());
+    DWORD ignored = 0;
+    VirtualProtect(target, g_gameplayActionReaderOriginalBytes.size(),
+                   oldProtect, &ignored);
+    g_gameplayActionReaderHookInstalled = true;
+    return true;
+}
+
+void RemoveGameplayActionReaderHook() {
+    if (!g_gameplayActionReaderHookInstalled) return;
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    auto* target = reinterpret_cast<std::uint8_t*>(
+        module + kGameplayActionReaderRva);
+    DWORD oldProtect = 0;
+    if (VirtualProtect(target, g_gameplayActionReaderOriginalBytes.size(),
+                       PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        std::memcpy(target, g_gameplayActionReaderOriginalBytes.data(),
+                    g_gameplayActionReaderOriginalBytes.size());
+        FlushInstructionCache(GetCurrentProcess(), target,
+                              g_gameplayActionReaderOriginalBytes.size());
+        DWORD ignored = 0;
+        VirtualProtect(target, g_gameplayActionReaderOriginalBytes.size(),
+                       oldProtect, &ignored);
+    }
+    g_gameplayActionReaderHookInstalled = false;
+}
 
 bool HookedQueryAction(void* inputContext, std::uint32_t action, float threshold,
                        bool allowHeld, bool useTimeWindow) {
@@ -1173,6 +1277,11 @@ void Worker() {
                 } else {
                     Log("One or more native UseGadget query hooks are unavailable");
                 }
+                if (InstallGameplayActionReaderHook()) {
+                    Log("Native four-state UseGadget tracer armed");
+                } else {
+                    Log("Native four-state UseGadget tracer unavailable");
+                }
             }
         }
     }
@@ -1194,6 +1303,7 @@ void Worker() {
     }
     WORD previousControllerButtons = 0;
     int activeControllerIndex = -1;
+    unsigned seenGameplayActionTrace = 0;
 
     while (g_running) {
         if (g_delayedNativeFirePending &&
@@ -1211,6 +1321,19 @@ void Worker() {
             GetTickCount64() > g_forceUseGadgetDeadline.load() &&
             g_forceUseGadgetPending.exchange(false)) {
             Log("Native UseGadget query window expired before gameplay consumed it");
+        }
+        const unsigned gameplayActionTrace =
+            g_gameplayActionTraceSequence.load();
+        if (gameplayActionTrace != seenGameplayActionTrace) {
+            seenGameplayActionTrace = gameplayActionTrace;
+            const std::uint32_t bits = g_gameplayActionTraceBits.load();
+            char line[160]{};
+            std::snprintf(line, sizeof(line),
+                          "TRACE genuine UseGadget state #%u bytes=%02X/%02X/%02X/%02X",
+                          gameplayActionTrace,
+                          bits & 0xFF, (bits >> 8) & 0xFF,
+                          (bits >> 16) & 0xFF, (bits >> 24) & 0xFF);
+            Log(line);
         }
 
         Config config;
@@ -1375,6 +1498,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         g_controllerModifierHeld = false;
         g_delayedNativeFirePending = false;
         g_forceUseGadgetPending = false;
+        RemoveGameplayActionReaderHook();
         RemoveQueryActionFlagHook();
         RemoveQueryActionWindowHook();
         RemoveQueryActionHook();
