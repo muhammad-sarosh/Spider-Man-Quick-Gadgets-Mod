@@ -231,6 +231,8 @@ constexpr std::uintptr_t kQueryActionRva = 0x0909320;
 constexpr std::uintptr_t kDirectUseGadgetReturnRva = 0x08A2AED;
 constexpr std::uintptr_t kQueryActionWindowRva = 0x09095E0;
 constexpr std::uintptr_t kDirectUseGadgetWindowReturnRva = 0x08A2AE3;
+constexpr std::uintptr_t kQueryActionFlagRva = 0x0909520;
+constexpr std::uintptr_t kControllerUseGadgetFlagReturnRva = 0x07943AC;
 constexpr std::size_t kInputContextHandleOffset = 0x78C;
 constexpr std::size_t kWeaponInventoryBase = 0x1A8;
 constexpr std::size_t kWeaponInventoryStride = 0x18;
@@ -257,6 +259,11 @@ QueryActionWindowFn g_originalQueryActionWindow = nullptr;
 void* g_queryActionWindowTrampoline = nullptr;
 std::array<std::uint8_t, 19> g_queryActionWindowOriginalBytes{};
 bool g_queryActionWindowHookInstalled = false;
+using QueryActionFlagFn = bool (*)(void*, std::uint32_t, bool);
+QueryActionFlagFn g_originalQueryActionFlag = nullptr;
+void* g_queryActionFlagTrampoline = nullptr;
+std::array<std::uint8_t, 17> g_queryActionFlagOriginalBytes{};
+bool g_queryActionFlagHookInstalled = false;
 
 bool HookedQueryAction(void* inputContext, std::uint32_t action, float threshold,
                        bool allowHeld, bool useTimeWindow) {
@@ -287,6 +294,21 @@ bool HookedQueryActionWindow(void* inputContext, std::uint32_t action,
     }
     return g_originalQueryActionWindow
         ? g_originalQueryActionWindow(inputContext, action, minimum, maximum, allowHeld)
+        : false;
+}
+
+bool HookedQueryActionFlag(void* inputContext, std::uint32_t action, bool released) {
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const auto returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+    if (action == kActionUseGadget &&
+        returnAddress == module + kControllerUseGadgetFlagReturnRva &&
+        GetTickCount64() <= g_forceUseGadgetDeadline.load() &&
+        g_forceUseGadgetPending.exchange(false)) {
+        g_forceUseGadgetObserved = true;
+        return true;
+    }
+    return g_originalQueryActionFlag
+        ? g_originalQueryActionFlag(inputContext, action, released)
         : false;
 }
 
@@ -387,6 +409,55 @@ bool InstallQueryActionWindowHook() {
     return true;
 }
 
+bool InstallQueryActionFlagHook() {
+    if (g_queryActionFlagHookInstalled) return true;
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    auto* target = reinterpret_cast<std::uint8_t*>(module + kQueryActionFlagRva);
+    constexpr std::uint8_t kExpectedPrologue[] = {
+        0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC,
+        0x20, 0x41, 0x0F, 0xB6, 0xF8, 0x48, 0x8B, 0xD9
+    };
+    if (std::memcmp(target, kExpectedPrologue, sizeof(kExpectedPrologue)) != 0) {
+        return false;
+    }
+
+    auto* trampoline = static_cast<std::uint8_t*>(VirtualAlloc(
+        nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!trampoline) return false;
+    std::memcpy(g_queryActionFlagOriginalBytes.data(), target,
+                g_queryActionFlagOriginalBytes.size());
+    std::memcpy(trampoline, target, g_queryActionFlagOriginalBytes.size());
+
+    auto writeAbsoluteJump = [](std::uint8_t* address, const void* destination) {
+        address[0] = 0xFF;
+        address[1] = 0x25;
+        *reinterpret_cast<std::uint32_t*>(address + 2) = 0;
+        *reinterpret_cast<std::uintptr_t*>(address + 6) =
+            reinterpret_cast<std::uintptr_t>(destination);
+    };
+    writeAbsoluteJump(trampoline + g_queryActionFlagOriginalBytes.size(),
+                      target + g_queryActionFlagOriginalBytes.size());
+
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(target, g_queryActionFlagOriginalBytes.size(),
+                        PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        return false;
+    }
+    g_queryActionFlagTrampoline = trampoline;
+    g_originalQueryActionFlag = reinterpret_cast<QueryActionFlagFn>(trampoline);
+    writeAbsoluteJump(target, reinterpret_cast<const void*>(&HookedQueryActionFlag));
+    for (std::size_t i = 14; i < g_queryActionFlagOriginalBytes.size(); ++i) {
+        target[i] = 0x90;
+    }
+    FlushInstructionCache(GetCurrentProcess(), target,
+                          g_queryActionFlagOriginalBytes.size());
+    DWORD ignored = 0;
+    VirtualProtect(target, g_queryActionFlagOriginalBytes.size(), oldProtect, &ignored);
+    g_queryActionFlagHookInstalled = true;
+    return true;
+}
+
 void RemoveQueryActionHook() {
     if (!g_queryActionHookInstalled) return;
     g_forceUseGadgetPending = false;
@@ -423,6 +494,24 @@ void RemoveQueryActionWindowHook() {
         VirtualProtect(target, g_queryActionWindowOriginalBytes.size(), oldProtect, &ignored);
     }
     g_queryActionWindowHookInstalled = false;
+}
+
+void RemoveQueryActionFlagHook() {
+    if (!g_queryActionFlagHookInstalled) return;
+    g_forceUseGadgetPending = false;
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    auto* target = reinterpret_cast<std::uint8_t*>(module + kQueryActionFlagRva);
+    DWORD oldProtect = 0;
+    if (VirtualProtect(target, g_queryActionFlagOriginalBytes.size(),
+                       PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        std::memcpy(target, g_queryActionFlagOriginalBytes.data(),
+                    g_queryActionFlagOriginalBytes.size());
+        FlushInstructionCache(GetCurrentProcess(), target,
+                              g_queryActionFlagOriginalBytes.size());
+        DWORD ignored = 0;
+        VirtualProtect(target, g_queryActionFlagOriginalBytes.size(), oldProtect, &ignored);
+    }
+    g_queryActionFlagHookInstalled = false;
 }
 
 bool ValidateNativeLayout() {
@@ -696,7 +785,8 @@ void SelectNativeSlotOnGameThread() {
             if (suppressFaces) SuppressFaceActions(inputContext);
             if (fire) {
                 g_nativeFireIssuedForCombo = true;
-                if (g_queryActionHookInstalled || g_queryActionWindowHookInstalled) {
+                if (g_queryActionHookInstalled || g_queryActionWindowHookInstalled ||
+                    g_queryActionFlagHookInstalled) {
                     g_forceUseGadgetContext = inputContext;
                     g_forceUseGadgetDeadline = GetTickCount64() + 250;
                     g_forceUseGadgetPending = true;
@@ -1025,7 +1115,8 @@ void Worker() {
             if (g_config.nativeDirectFire) {
                 const bool pressHook = InstallQueryActionHook();
                 const bool windowHook = InstallQueryActionWindowHook();
-                if (pressHook && windowHook) {
+                const bool flagHook = InstallQueryActionFlagHook();
+                if (pressHook && windowHook && flagHook) {
                     Log("Native UseGadget gameplay query hooks armed");
                 } else {
                     Log("One or more native UseGadget query hooks are unavailable");
@@ -1214,6 +1305,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     }
     if (reason == DLL_PROCESS_DETACH) {
         g_running = false;
+        RemoveQueryActionFlagHook();
         RemoveQueryActionWindowHook();
         RemoveQueryActionHook();
     }
