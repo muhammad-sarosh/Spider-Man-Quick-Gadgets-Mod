@@ -207,6 +207,7 @@ constexpr int kNativeRequestSuppressFaces = 0x200;
 std::atomic_int g_pendingNativeRequest = kNoNativeRequest;
 std::atomic_bool g_controllerComboHeld = false;
 std::atomic_bool g_controllerModifierHeld = false;
+std::atomic_bool g_controllerFaceSuppressionLatched = false;
 std::atomic_bool g_nativeFireIssuedForCombo = false;
 std::atomic_bool g_suppressionCallbackQueued = false;
 std::atomic_bool g_physicalUseSuppressedObserved = false;
@@ -285,6 +286,13 @@ void* g_gameplayActionReaderTrampoline = nullptr;
 std::array<std::uint8_t, 15> g_gameplayActionReaderOriginalBytes{};
 bool g_gameplayActionReaderHookInstalled = false;
 
+bool IsControllerFaceAction(std::uint32_t action) {
+    return action == kActionAttack ||
+        action == kActionDodge ||
+        action == kActionJump ||
+        action == kActionWebStrike;
+}
+
 void* HookedGameplayActionReader(void* owner, void* output, void* actionTable,
                                  float threshold, void* selector) {
     void* result = g_originalGameplayActionReader
@@ -297,6 +305,14 @@ void* HookedGameplayActionReader(void* owner, void* output, void* actionTable,
             const auto entry = reinterpret_cast<const std::uint8_t*>(actionTable) +
                 static_cast<std::size_t>(index) * 0x18;
             const auto action = *reinterpret_cast<const std::uint32_t*>(entry + 0x14);
+            // Consume the underlying face-button action at the same native
+            // boundary where gameplay reads it. The earlier asynchronous
+            // ConsumeAction callback raced the game update, allowing the
+            // gadget and dodge/jump/attack to happen together.
+            if (g_controllerFaceSuppressionLatched.load() &&
+                IsControllerFaceAction(action)) {
+                std::memset(output, 0, sizeof(std::uint32_t));
+            }
             if (action == kActionUseGadget) {
                 // A genuine controller tap culminates in 01/00/01/01. The
                 // engine exposes that same state to every active-weapon
@@ -395,6 +411,10 @@ void RemoveGameplayActionReaderHook() {
 
 bool HookedQueryAction(void* inputContext, std::uint32_t action, float threshold,
                        bool allowHeld, bool useTimeWindow) {
+    if (g_controllerFaceSuppressionLatched.load() &&
+        IsControllerFaceAction(action)) {
+        return false;
+    }
     return g_originalQueryAction
         ? g_originalQueryAction(inputContext, action, threshold, allowHeld, useTimeWindow)
         : false;
@@ -402,12 +422,20 @@ bool HookedQueryAction(void* inputContext, std::uint32_t action, float threshold
 
 bool HookedQueryActionWindow(void* inputContext, std::uint32_t action,
                              float minimum, float maximum, bool allowHeld) {
+    if (g_controllerFaceSuppressionLatched.load() &&
+        IsControllerFaceAction(action)) {
+        return false;
+    }
     return g_originalQueryActionWindow
         ? g_originalQueryActionWindow(inputContext, action, minimum, maximum, allowHeld)
         : false;
 }
 
 bool HookedQueryActionFlag(void* inputContext, std::uint32_t action, bool released) {
+    if (g_controllerFaceSuppressionLatched.load() &&
+        IsControllerFaceAction(action)) {
+        return false;
+    }
     if (action == kActionUseGadget) {
         const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
         const auto returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
@@ -1419,6 +1447,14 @@ void Worker() {
                     const bool comboHeld = (buttons & config.controllerModifier) &&
                         (buttons & kFaceMask);
                     g_controllerComboHeld = comboHeld;
+                    if (comboHeld) {
+                        g_controllerFaceSuppressionLatched = true;
+                    } else if ((buttons & kFaceMask) == 0) {
+                        // Keep suppression latched if the modifier is released
+                        // first; clear it only after the physical face button
+                        // has also returned to neutral.
+                        g_controllerFaceSuppressionLatched = false;
+                    }
                     if (!comboHeld) g_nativeFireIssuedForCombo = false;
                     if (comboHeld) {
                         if (!g_suppressionCallbackQueued.exchange(true)) {
@@ -1438,6 +1474,7 @@ void Worker() {
                     activeControllerIndex = -1;
                     g_controllerComboHeld = false;
                     g_controllerModifierHeld = false;
+                    g_controllerFaceSuppressionLatched = false;
                     previousControllerButtons = 0;
                 }
             }
@@ -1509,6 +1546,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_DETACH) {
         g_running = false;
         g_controllerModifierHeld = false;
+        g_controllerFaceSuppressionLatched = false;
         g_delayedNativeFirePending = false;
         g_forceUseGadgetPending = false;
         RemoveGameplayActionReaderHook();
