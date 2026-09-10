@@ -203,10 +203,8 @@ constexpr int kNativeRequestSlotMask = 0xFF;
 constexpr int kNativeRequestFire = 0x100;
 constexpr int kNativeRequestSuppressFaces = 0x200;
 std::atomic_int g_pendingNativeRequest = kNoNativeRequest;
-std::atomic_bool g_nativeUseReleasePending = false;
-std::atomic_ullong g_nativeUseReleaseAt = 0;
-std::atomic_bool g_nativeFirePulseActive = false;
 std::atomic_bool g_controllerComboHeld = false;
+std::atomic_bool g_nativeFireIssuedForCombo = false;
 std::atomic_bool g_suppressionCallbackQueued = false;
 std::atomic<void*> g_weaponManager = nullptr;
 std::atomic<void*> g_cachedHero = nullptr;
@@ -222,7 +220,8 @@ constexpr std::uintptr_t kSelectWeaponByIdRva = 0x09A5FF0;
 constexpr std::uintptr_t kSelectWeaponAndNotifyRva = 0x09A4110;
 constexpr std::uintptr_t kResolveAssetHandleRva = 0x15A0560;
 constexpr std::uintptr_t kResolveHandleRva = 0x16798F0;
-constexpr std::uintptr_t kSetActionValueRva = 0x09098C0;
+constexpr std::uintptr_t kConsumeActionRva = 0x09097C0;
+constexpr std::uintptr_t kTriggerActionRva = 0x09098C0;
 constexpr std::size_t kInputContextHandleOffset = 0x78C;
 constexpr std::size_t kWeaponInventoryBase = 0x1A8;
 constexpr std::size_t kWeaponInventoryStride = 0x18;
@@ -265,7 +264,7 @@ bool ValidateNativeLayout() {
                     kExpectedResolverBytes, sizeof(kExpectedResolverBytes)) == 0 &&
         std::memcmp(reinterpret_cast<const void*>(module + kResolveAssetHandleRva),
                     kExpectedAssetResolverBytes, sizeof(kExpectedAssetResolverBytes)) == 0 &&
-        std::memcmp(reinterpret_cast<const void*>(module + kSetActionValueRva),
+        std::memcmp(reinterpret_cast<const void*>(module + kTriggerActionRva),
                     kExpectedActionSetterBytes, sizeof(kExpectedActionSetterBytes)) == 0;
 }
 
@@ -323,20 +322,32 @@ void* ResolveInputContext(void* manager) {
         reinterpret_cast<std::uintptr_t>(manager) + kInputContextHandleOffset));
 }
 
-void SetActionValue(void* inputContext, std::uint32_t action, float value) {
+void ConsumeAction(void* inputContext, std::uint32_t action) {
     if (!inputContext) return;
-    using SetActionValueFn = void (*)(void*, std::uint32_t, float);
+    using ConsumeActionFn = void (*)(void*, std::uint32_t, float);
     const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-    const auto setActionValue =
-        reinterpret_cast<SetActionValueFn>(module + kSetActionValueRva);
-    setActionValue(inputContext, action, value);
+    const auto consumeAction =
+        reinterpret_cast<ConsumeActionFn>(module + kConsumeActionRva);
+    consumeAction(inputContext, action, 0.0f);
+}
+
+void TriggerAction(void* inputContext, std::uint32_t action) {
+    if (!inputContext) return;
+    using TriggerActionFn = void (*)(void*, std::uint32_t, float);
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const auto triggerAction =
+        reinterpret_cast<TriggerActionFn>(module + kTriggerActionRva);
+    // The third argument is a time offset, not an analog action value. A zero
+    // offset stamps the action at the current input time. Passing 1.0 here
+    // backdates the event by one second, outside UseGadget's press window.
+    triggerAction(inputContext, action, 0.0f);
 }
 
 void SuppressFaceActions(void* inputContext) {
-    SetActionValue(inputContext, kActionAttack, 0.0f);
-    SetActionValue(inputContext, kActionDodge, 0.0f);
-    SetActionValue(inputContext, kActionJump, 0.0f);
-    SetActionValue(inputContext, kActionWebStrike, 0.0f);
+    ConsumeAction(inputContext, kActionAttack);
+    ConsumeAction(inputContext, kActionDodge);
+    ConsumeAction(inputContext, kActionJump);
+    ConsumeAction(inputContext, kActionWebStrike);
 }
 
 void* FindHeroWeaponManager(void* hero) {
@@ -497,10 +508,8 @@ void SelectNativeSlotOnGameThread() {
         } else {
             if (suppressFaces) SuppressFaceActions(inputContext);
             if (fire) {
-                g_nativeFirePulseActive = true;
-                SetActionValue(inputContext, kActionUseGadget, 1.0f);
-                g_nativeUseReleaseAt = GetTickCount64() + 34;
-                g_nativeUseReleasePending = true;
+                g_nativeFireIssuedForCombo = true;
+                TriggerAction(inputContext, kActionUseGadget);
             }
         }
     }
@@ -514,24 +523,17 @@ void SelectNativeSlotOnGameThread() {
     Log(line);
 }
 
-void ReleaseNativeUseOnGameThread() {
-    g_nativeFirePulseActive = false;
-    if (!g_native.getPlayerHero) return;
-    void* manager = FindHeroWeaponManager(g_native.getPlayerHero());
-    void* inputContext = ResolveInputContext(manager);
-    if (!inputContext) return;
-    SetActionValue(inputContext, kActionUseGadget, 0.0f);
-    SuppressFaceActions(inputContext);
-}
-
 void SuppressControllerComboOnGameThread() {
     if (g_controllerComboHeld && g_native.getPlayerHero) {
         void* manager = FindHeroWeaponManager(g_native.getPlayerHero());
         void* inputContext = ResolveInputContext(manager);
         if (inputContext) {
             SuppressFaceActions(inputContext);
-            if (!g_nativeFirePulseActive) {
-                SetActionValue(inputContext, kActionUseGadget, 0.0f);
+            // Consume the physical RB action until the shortcut has selected
+            // its gadget. Once TriggerAction stamps the synthetic press, do
+            // not erase that press with a later suppression callback.
+            if (!g_nativeFireIssuedForCombo) {
+                ConsumeAction(inputContext, kActionUseGadget);
             }
         }
     }
@@ -913,6 +915,7 @@ void Worker() {
                     const bool comboHeld = (buttons & kRightShoulder) &&
                         (buttons & kFaceMask);
                     g_controllerComboHeld = comboHeld;
+                    if (!comboHeld) g_nativeFireIssuedForCombo = false;
                     if (comboHeld) {
                         if (!g_suppressionCallbackQueued.exchange(true)) {
                             g_native.gameMainThreadCall(&SuppressControllerComboOnGameThread);
@@ -932,14 +935,6 @@ void Worker() {
                     g_controllerComboHeld = false;
                     previousControllerButtons = 0;
                 }
-            }
-        }
-
-        if (g_nativeUseReleasePending &&
-            GetTickCount64() >= g_nativeUseReleaseAt.load()) {
-            if (g_nativeUseReleasePending.exchange(false) &&
-                g_native.gameMainThreadCall) {
-                g_native.gameMainThreadCall(&ReleaseNativeUseOnGameThread);
             }
         }
 
