@@ -211,6 +211,8 @@ std::atomic_bool g_forceUseGadgetPending = false;
 std::atomic_bool g_forceUseGadgetObserved = false;
 std::atomic_ullong g_forceUseGadgetDeadline = 0;
 std::atomic<void*> g_forceUseGadgetContext = nullptr;
+std::atomic_bool g_delayedNativeFirePending = false;
+std::atomic_ullong g_delayedNativeFireAt = 0;
 std::atomic<void*> g_weaponManager = nullptr;
 std::atomic<void*> g_cachedHero = nullptr;
 
@@ -634,6 +636,28 @@ void SuppressFaceActions(void* inputContext) {
     ConsumeAction(inputContext, kActionWebStrike);
 }
 
+void* FindHeroWeaponManager(void* hero);
+
+void ArmNativeFireOnGameThread() {
+    if (!g_running || !g_native.getPlayerHero) return;
+    void* manager = FindHeroWeaponManager(g_native.getPlayerHero());
+    void* inputContext = ResolveInputContext(manager);
+    if (!inputContext) {
+        Log("Delayed native fire failed: input action context was not available");
+        return;
+    }
+
+    if (g_queryActionHookInstalled || g_queryActionWindowHookInstalled ||
+        g_queryActionFlagHookInstalled) {
+        g_forceUseGadgetContext = inputContext;
+        g_forceUseGadgetDeadline = GetTickCount64() + 250;
+        g_forceUseGadgetPending = true;
+    } else {
+        TriggerAction(inputContext, kActionUseGadget);
+    }
+    Log("Native UseGadget armed after equipment transition settled");
+}
+
 void* FindHeroWeaponManager(void* hero) {
     if (g_cachedHero.load() != hero) {
         g_weaponManager = nullptr;
@@ -812,14 +836,11 @@ void SelectNativeSlotOnGameThread() {
             if (suppressFaces) SuppressFaceActions(inputContext);
             if (fire) {
                 g_nativeFireIssuedForCombo = true;
-                if (g_queryActionHookInstalled || g_queryActionWindowHookInstalled ||
-                    g_queryActionFlagHookInstalled) {
-                    g_forceUseGadgetContext = inputContext;
-                    g_forceUseGadgetDeadline = GetTickCount64() + 250;
-                    g_forceUseGadgetPending = true;
-                } else {
-                    TriggerAction(inputContext, kActionUseGadget);
-                }
+                // The equipment setter dispatches activation events. Let the
+                // game process several frames before exposing the synthetic
+                // press, otherwise the fire handler still owns Web Shooter.
+                g_delayedNativeFireAt = GetTickCount64() + 75;
+                g_delayedNativeFirePending = true;
             }
         }
     }
@@ -830,7 +851,7 @@ void SelectNativeSlotOnGameThread() {
                   slot + 1, gadgetName ? gadgetName : "<unknown>", weaponId,
                   previousWeaponId,
                   repairedStaleSelection ? ", repaired stale active id" : "",
-                  fire ? " and pulsed UseGadget" : "");
+                  fire ? " and queued delayed UseGadget" : "");
     Log(line);
 }
 
@@ -1172,6 +1193,11 @@ void Worker() {
     int activeControllerIndex = -1;
 
     while (g_running) {
+        if (g_delayedNativeFirePending &&
+            GetTickCount64() >= g_delayedNativeFireAt.load() &&
+            g_delayedNativeFirePending.exchange(false)) {
+            g_native.gameMainThreadCall(&ArmNativeFireOnGameThread);
+        }
         if (g_forceUseGadgetObserved.exchange(false)) {
             Log("Native UseGadget gameplay query intercepted");
         }
@@ -1333,6 +1359,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     }
     if (reason == DLL_PROCESS_DETACH) {
         g_running = false;
+        g_delayedNativeFirePending = false;
+        g_forceUseGadgetPending = false;
         RemoveQueryActionFlagHook();
         RemoveQueryActionWindowHook();
         RemoveQueryActionHook();
