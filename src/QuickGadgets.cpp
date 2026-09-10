@@ -236,6 +236,7 @@ constexpr std::uintptr_t kResolveHandleRva = 0x16798F0;
 constexpr std::uintptr_t kConsumeActionRva = 0x09097C0;
 constexpr std::uintptr_t kTriggerActionRva = 0x09098C0;
 constexpr std::uintptr_t kQueryActionRva = 0x0909320;
+constexpr std::uintptr_t kQueryActionRangeRva = 0x0909150;
 constexpr std::uintptr_t kDirectUseGadgetReturnRva = 0x08A2AED;
 constexpr std::uintptr_t kQueryActionWindowRva = 0x09095E0;
 // Verified from a genuine Impact Web shot on 4.0630.0.0. This is the gameplay
@@ -273,6 +274,11 @@ QueryActionWindowFn g_originalQueryActionWindow = nullptr;
 void* g_queryActionWindowTrampoline = nullptr;
 std::array<std::uint8_t, 19> g_queryActionWindowOriginalBytes{};
 bool g_queryActionWindowHookInstalled = false;
+using QueryActionRangeFn = bool (*)(void*, std::uint32_t, float, float, bool);
+QueryActionRangeFn g_originalQueryActionRange = nullptr;
+void* g_queryActionRangeTrampoline = nullptr;
+std::array<std::uint8_t, 19> g_queryActionRangeOriginalBytes{};
+bool g_queryActionRangeHookInstalled = false;
 using QueryActionFlagFn = bool (*)(void*, std::uint32_t, bool);
 QueryActionFlagFn g_originalQueryActionFlag = nullptr;
 void* g_queryActionFlagTrampoline = nullptr;
@@ -431,6 +437,17 @@ bool HookedQueryActionWindow(void* inputContext, std::uint32_t action,
         : false;
 }
 
+bool HookedQueryActionRange(void* inputContext, std::uint32_t action,
+                            float minimum, float maximum, bool allowHeld) {
+    if (g_controllerFaceSuppressionLatched.load() &&
+        IsControllerFaceAction(action)) {
+        return false;
+    }
+    return g_originalQueryActionRange
+        ? g_originalQueryActionRange(inputContext, action, minimum, maximum, allowHeld)
+        : false;
+}
+
 bool HookedQueryActionFlag(void* inputContext, std::uint32_t action, bool released) {
     if (g_controllerFaceSuppressionLatched.load() &&
         IsControllerFaceAction(action)) {
@@ -549,6 +566,55 @@ bool InstallQueryActionWindowHook() {
     return true;
 }
 
+bool InstallQueryActionRangeHook() {
+    if (g_queryActionRangeHookInstalled) return true;
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    auto* target = reinterpret_cast<std::uint8_t*>(module + kQueryActionRangeRva);
+    constexpr std::uint8_t kExpectedPrologue[] = {
+        0x40, 0x53, 0x48, 0x83, 0xEC, 0x40, 0x0F, 0x29, 0x74, 0x24,
+        0x30, 0x0F, 0x28, 0xF2, 0x0F, 0x29, 0x7C, 0x24, 0x20
+    };
+    if (std::memcmp(target, kExpectedPrologue, sizeof(kExpectedPrologue)) != 0) {
+        return false;
+    }
+
+    auto* trampoline = static_cast<std::uint8_t*>(VirtualAlloc(
+        nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!trampoline) return false;
+    std::memcpy(g_queryActionRangeOriginalBytes.data(), target,
+                g_queryActionRangeOriginalBytes.size());
+    std::memcpy(trampoline, target, g_queryActionRangeOriginalBytes.size());
+
+    auto writeAbsoluteJump = [](std::uint8_t* address, const void* destination) {
+        address[0] = 0xFF;
+        address[1] = 0x25;
+        *reinterpret_cast<std::uint32_t*>(address + 2) = 0;
+        *reinterpret_cast<std::uintptr_t*>(address + 6) =
+            reinterpret_cast<std::uintptr_t>(destination);
+    };
+    writeAbsoluteJump(trampoline + g_queryActionRangeOriginalBytes.size(),
+                      target + g_queryActionRangeOriginalBytes.size());
+
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(target, g_queryActionRangeOriginalBytes.size(),
+                        PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        return false;
+    }
+    g_queryActionRangeTrampoline = trampoline;
+    g_originalQueryActionRange = reinterpret_cast<QueryActionRangeFn>(trampoline);
+    writeAbsoluteJump(target, reinterpret_cast<const void*>(&HookedQueryActionRange));
+    for (std::size_t i = 14; i < g_queryActionRangeOriginalBytes.size(); ++i) {
+        target[i] = 0x90;
+    }
+    FlushInstructionCache(GetCurrentProcess(), target,
+                          g_queryActionRangeOriginalBytes.size());
+    DWORD ignored = 0;
+    VirtualProtect(target, g_queryActionRangeOriginalBytes.size(), oldProtect, &ignored);
+    g_queryActionRangeHookInstalled = true;
+    return true;
+}
+
 bool InstallQueryActionFlagHook() {
     if (g_queryActionFlagHookInstalled) return true;
     const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
@@ -634,6 +700,23 @@ void RemoveQueryActionWindowHook() {
         VirtualProtect(target, g_queryActionWindowOriginalBytes.size(), oldProtect, &ignored);
     }
     g_queryActionWindowHookInstalled = false;
+}
+
+void RemoveQueryActionRangeHook() {
+    if (!g_queryActionRangeHookInstalled) return;
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    auto* target = reinterpret_cast<std::uint8_t*>(module + kQueryActionRangeRva);
+    DWORD oldProtect = 0;
+    if (VirtualProtect(target, g_queryActionRangeOriginalBytes.size(),
+                       PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        std::memcpy(target, g_queryActionRangeOriginalBytes.data(),
+                    g_queryActionRangeOriginalBytes.size());
+        FlushInstructionCache(GetCurrentProcess(), target,
+                              g_queryActionRangeOriginalBytes.size());
+        DWORD ignored = 0;
+        VirtualProtect(target, g_queryActionRangeOriginalBytes.size(), oldProtect, &ignored);
+    }
+    g_queryActionRangeHookInstalled = false;
 }
 
 void RemoveQueryActionFlagHook() {
@@ -947,19 +1030,12 @@ void SelectNativeSlotOnGameThread() {
     const std::uint32_t previousWeaponId = *reinterpret_cast<std::uint32_t*>(
         managerAddress + kActiveWeaponSlot0Offset);
 
-    // Earlier diagnostic builds could leave +6C claiming Impact Web while the
-    // live weapon object was still Web Shooter. Force a real transition away
-    // and back when the requested ID already occupies the slot.
-    bool repairedStaleSelection = false;
-    if (previousWeaponId == weaponId && slot != WebShooter) {
-        const std::uint32_t webShooterId = FindGadgetWeaponId(
-            manager, WebShooter, nullptr);
-        if (webShooterId && webShooterId != weaponId) {
-            repairedStaleSelection = setActiveWeapon(
-                manager, webShooterId, 0, true);
-        }
-    }
-    const bool selected = setActiveWeapon(manager, weaponId, 0, true);
+    // If the gadget is already active, keep its live weapon object intact and
+    // deliver another fire edge. Cycling away and back here could leave the
+    // activation transition unfinished when the synthetic edge arrived.
+    const bool alreadyActive = previousWeaponId == weaponId;
+    const bool selected = alreadyActive ||
+        setActiveWeapon(manager, weaponId, 0, true);
 
     if (!selected) {
         char line[192]{};
@@ -992,7 +1068,7 @@ void SelectNativeSlotOnGameThread() {
                   "Native transitioned slot %d (%s, weapon id 0x%08X, previous 0x%08X)%s%s",
                   slot + 1, gadgetName ? gadgetName : "<unknown>", weaponId,
                   previousWeaponId,
-                  repairedStaleSelection ? ", repaired stale active id" : "",
+                  alreadyActive ? ", already active" : "",
                   fire ? " and queued delayed UseGadget" : "");
     Log(line);
 }
@@ -1308,8 +1384,9 @@ void Worker() {
             if (g_config.nativeDirectFire) {
                 const bool pressHook = InstallQueryActionHook();
                 const bool windowHook = InstallQueryActionWindowHook();
+                const bool rangeHook = InstallQueryActionRangeHook();
                 const bool flagHook = InstallQueryActionFlagHook();
-                if (pressHook && windowHook && flagHook) {
+                if (pressHook && windowHook && rangeHook && flagHook) {
                     Log("Native UseGadget gameplay query hooks armed");
                 } else {
                     Log("One or more native UseGadget query hooks are unavailable");
@@ -1442,12 +1519,14 @@ void Worker() {
                     constexpr WORD kFaces[] = { 0x1000, 0x2000, 0x4000, 0x8000 }; // A B X Y
                     constexpr WORD kFaceMask = 0xF000;
                     const WORD buttons = state.gamepad.buttons;
-                    g_controllerModifierHeld =
+                    const bool modifierHeld =
                         (buttons & config.controllerModifier) != 0;
-                    const bool comboHeld = (buttons & config.controllerModifier) &&
+                    g_controllerModifierHeld = modifierHeld;
+                    const bool comboHeld = modifierHeld &&
                         (buttons & kFaceMask);
                     g_controllerComboHeld = comboHeld;
-                    if (comboHeld) {
+                    if (modifierHeld) {
+                        // Latch before the face-button edge reaches gameplay.
                         g_controllerFaceSuppressionLatched = true;
                     } else if ((buttons & kFaceMask) == 0) {
                         // Keep suppression latched if the modifier is released
@@ -1551,6 +1630,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         g_forceUseGadgetPending = false;
         RemoveGameplayActionReaderHook();
         RemoveQueryActionFlagHook();
+        RemoveQueryActionRangeHook();
         RemoveQueryActionWindowHook();
         RemoveQueryActionHook();
     }
