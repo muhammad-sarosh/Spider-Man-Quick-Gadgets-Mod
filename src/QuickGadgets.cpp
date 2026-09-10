@@ -47,6 +47,7 @@ struct Config {
     bool restoreWebShooter = false;
     bool keyboardWheelFallback = false;
     bool nativeProbe = false;
+    int nativeProbeLevel = 1;
     bool enabled = true;
 };
 
@@ -187,9 +188,10 @@ struct NativeApi {
 NativeApi g_native;
 std::atomic_bool g_probeFinished = false;
 std::atomic_bool g_probeLoggedHero = false;
+std::atomic_int g_nativeProbeLevel = 1;
 
 void ProbeComponentsOnGameThread() {
-    if (!g_running || !g_native.getPlayerHero || !g_native.getComponentByName) return;
+    if (!g_running || !g_native.getPlayerHero) return;
 
     // This is a read-only probe and never writes to the game. The hook helper
     // validates the entity/component lookup before returning its pointer.
@@ -202,6 +204,13 @@ void ProbeComponentsOnGameThread() {
         Log(line);
     }
 
+    const int probeLevel = g_nativeProbeLevel.load();
+    if (probeLevel <= 1) {
+        Log("Native probe level 1 complete (GetPlayerHero only)");
+        g_probeFinished = true;
+        return;
+    }
+
     if (g_native.getComponents) {
         PointerVector components{};
         g_native.getComponents(&components, hero);
@@ -210,6 +219,11 @@ void ProbeComponentsOnGameThread() {
             char line[128]{};
             std::snprintf(line, sizeof(line), "Hero component enumeration returned %zu entries", count);
             Log(line);
+            if (probeLevel == 2) {
+                Log("Native probe level 2 complete (GetComponents count only)");
+                g_probeFinished = true;
+                return;
+            }
             for (std::size_t i = 0; i < count && i < 512; ++i) {
                 void* component = components.begin[i];
                 if (!component) continue;
@@ -225,6 +239,7 @@ void ProbeComponentsOnGameThread() {
                               *reinterpret_cast<void**>(component));
                 Log(componentLine);
 
+                if (probeLevel < 4) continue;
                 const bool interesting = name &&
                     (std::strstr(name, "Gadget") ||
                      std::strstr(name, "Loadout") ||
@@ -246,6 +261,24 @@ void ProbeComponentsOnGameThread() {
         } else {
             Log("GetComponents returned an empty or invalid component vector");
         }
+    }
+
+    if (probeLevel == 3) {
+        Log("Native probe level 3 complete (component names only)");
+        g_probeFinished = true;
+        return;
+    }
+
+    if (probeLevel == 4) {
+        Log("Native probe level 4 complete (component vtables)");
+        g_probeFinished = true;
+        return;
+    }
+
+    if (!g_native.getComponentByName) {
+        Log("Native probe level 5 skipped: GetComponentByName export unavailable");
+        g_probeFinished = true;
+        return;
     }
 
     constexpr const char* kCandidates[] = {
@@ -289,7 +322,10 @@ void NativeProbeWorker() {
         return;
     }
 
-    Log("Native probe armed; waiting for the player entity");
+    char line[128]{};
+    std::snprintf(line, sizeof(line), "Native probe armed at level %d; waiting for the player entity",
+                  g_nativeProbeLevel.load());
+    Log(line);
     for (int attempt = 0; g_running && !g_probeFinished && attempt < 120; ++attempt) {
         g_native.gameMainThreadCall(&ProbeComponentsOnGameThread);
         Sleep(1000);
@@ -318,6 +354,8 @@ Config LoadConfig() {
     config.restoreWebShooter = ReadBool(L"QuickGadgets", L"RestoreWebShooter", config.restoreWebShooter, path);
     config.keyboardWheelFallback = ReadBool(L"QuickGadgets", L"KeyboardWheelFallback", config.keyboardWheelFallback, path);
     config.nativeProbe = ReadBool(L"QuickGadgets", L"NativeProbe", config.nativeProbe, path);
+    config.nativeProbeLevel = std::clamp(ReadInt(L"QuickGadgets", L"NativeProbeLevel",
+                                                 config.nativeProbeLevel, path), 1, 5);
     config.enabled = ReadBool(L"QuickGadgets", L"Enabled", config.enabled, path);
     for (int i = 0; i < kGadgetCount; ++i) {
         const std::wstring name = L"Slot" + std::to_wstring(i + 1);
@@ -360,17 +398,20 @@ bool Down(WORD key) {
 void Worker() {
     bool keyboardWheelFallback = false;
     bool nativeProbe = false;
+    int nativeProbeLevel = 1;
     {
         std::lock_guard lock(g_configMutex);
         g_config = LoadConfig();
         g_enabled = g_config.enabled;
         keyboardWheelFallback = g_config.keyboardWheelFallback;
         nativeProbe = g_config.nativeProbe;
+        nativeProbeLevel = g_config.nativeProbeLevel;
     }
     Log(keyboardWheelFallback
         ? "Quick Gadgets enabled. Keyboard wheel fallback is ON."
         : "Quick Gadgets enabled. Native route only; keyboard wheel fallback is OFF.");
     if (nativeProbe) {
+        g_nativeProbeLevel = nativeProbeLevel;
         std::thread(NativeProbeWorker).detach();
     } else {
         Log("Native probe is disabled; no game component calls will be made.");

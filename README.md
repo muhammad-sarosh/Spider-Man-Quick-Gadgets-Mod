@@ -44,7 +44,9 @@ include the live hero component list. This confirms which gadget-control
 objects and vtables are available before calling any internal direct-fire
 routine; it does not change gameplay by itself. The probe is now opt-in:
 NativeProbe=1 is required, because some Script Hook builds can crash while
-enumerating components. Leave it at 0 for normal play.
+enumerating components. Leave it at 0 for normal play. When diagnosing, set
+NativeProbeLevel from 1 through 5 to add one operation at a time: hero pointer,
+component count, component names, vtable reads, then named component lookups.
 
 ## Configure
 
