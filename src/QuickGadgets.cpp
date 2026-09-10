@@ -193,6 +193,7 @@ struct NativeApi {
 NativeApi g_native;
 std::atomic_bool g_probeFinished = false;
 std::atomic_bool g_probeLoggedHero = false;
+std::atomic_bool g_gadgetLayoutLogged = false;
 std::atomic_int g_nativeProbeLevel = 1;
 // Keep a queued request coherent across the worker and game threads. Separate
 // atomics allowed the callback to observe a new slot before its fire/suppress
@@ -315,6 +316,72 @@ void* FindHeroWeaponManager(void* hero) {
     return nullptr;
 }
 
+void LogGadgetLayout(void* hero, void* manager) {
+    if (!hero || !manager || g_gadgetLayoutLogged.exchange(true)) return;
+
+    const auto base = reinterpret_cast<std::uintptr_t>(manager);
+    const auto inventoryCount = *reinterpret_cast<const std::uint32_t*>(base + 0x628);
+    char line[256]{};
+    std::snprintf(line, sizeof(line),
+                  "HeroWeaponManager active equip ids: %08X %08X %08X; inventory count: %u",
+                  *reinterpret_cast<const std::uint32_t*>(base + 0x6C),
+                  *reinterpret_cast<const std::uint32_t*>(base + 0x94),
+                  *reinterpret_cast<const std::uint32_t*>(base + 0xBC),
+                  inventoryCount);
+    Log(line);
+
+    if (inventoryCount <= 256) {
+        for (std::uint32_t index = 0; index < inventoryCount; ++index) {
+            const auto entry = base + 0x1A8 + static_cast<std::size_t>(index) * 0x18;
+            const auto field0 = *reinterpret_cast<const std::uint64_t*>(entry);
+            const auto field8 = *reinterpret_cast<const std::uint64_t*>(entry + 8);
+            const auto weaponId = *reinterpret_cast<const std::uint32_t*>(entry + 0x10);
+            const auto field14 = *reinterpret_cast<const std::uint32_t*>(entry + 0x14);
+            std::snprintf(line, sizeof(line),
+                          "Weapon inventory[%03u]: %016llX %016llX id=%08X tail=%08X",
+                          index,
+                          static_cast<unsigned long long>(field0),
+                          static_cast<unsigned long long>(field8),
+                          weaponId, field14);
+            Log(line);
+        }
+    } else {
+        Log("Weapon inventory count rejected as implausible");
+    }
+
+    constexpr const char* kGadgetComponents[] = {
+        "GadgetWheel", "kGadgetWheel",
+        "GadgetHolster", "kGadgetHolster",
+        "GadgetItemAmmoManager", "AVGadgetItemAmmoManager",
+        "HeroGadgetConfig", "AVHeroGadgetConfig",
+        "GadgetAimLayer", "kGadgetAimLayer",
+    };
+    for (const char* candidate : kGadgetComponents) {
+        EngineString name(candidate);
+        void* component = g_native.getComponentByName(hero, &name);
+        if (!component) continue;
+        const char* resolvedName = g_native.getComponentName
+            ? g_native.getComponentName(component)
+            : nullptr;
+        std::snprintf(line, sizeof(line),
+                      "Gadget component %-24s -> %p (engine name: %s, vtable: %p)",
+                      candidate, component,
+                      resolvedName ? resolvedName : "<unknown>",
+                      *reinterpret_cast<void**>(component));
+        Log(line);
+    }
+
+    std::snprintf(line, sizeof(line),
+                  "Manager gadget state: +790=%08X +798=%08X +79C=%08X +7B4=%08X +7B8=%08X +7BC=%08X",
+                  *reinterpret_cast<const std::uint32_t*>(base + 0x790),
+                  *reinterpret_cast<const std::uint32_t*>(base + 0x798),
+                  *reinterpret_cast<const std::uint32_t*>(base + 0x79C),
+                  *reinterpret_cast<const std::uint32_t*>(base + 0x7B4),
+                  *reinterpret_cast<const std::uint32_t*>(base + 0x7B8),
+                  *reinterpret_cast<const std::uint32_t*>(base + 0x7BC));
+    Log(line);
+}
+
 void SelectNativeSlotOnGameThread() {
     const int request = g_pendingNativeRequest.exchange(kNoNativeRequest);
     if (request == kNoNativeRequest) return;
@@ -330,40 +397,14 @@ void SelectNativeSlotOnGameThread() {
         return;
     }
 
-    const auto slotAddress = reinterpret_cast<std::uintptr_t>(manager) +
-        kWeaponSlotBase + static_cast<std::size_t>(slot) * kWeaponSlotStride;
-    const auto weaponId = *reinterpret_cast<const std::uint32_t*>(slotAddress);
-    if (!weaponId) {
-        char line[128]{};
-        std::snprintf(line, sizeof(line), "Native slot %d is empty or locked", slot + 1);
-        Log(line);
-        return;
-    }
-
-    using SelectWeaponAndNotifyFn = void (*)(void*, std::uint32_t);
-    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-    const auto selectWeaponAndNotify =
-        reinterpret_cast<SelectWeaponAndNotifyFn>(module + kSelectWeaponAndNotifyRva);
-    selectWeaponAndNotify(manager, weaponId);
-
-    if (fire || suppressFaces) {
-        void* inputContext = ResolveInputContext(manager);
-        if (!inputContext) {
-            Log("Native fire failed: input action context was not available");
-        } else {
-            if (suppressFaces) SuppressFaceActions(inputContext);
-            if (fire) {
-                g_nativeFirePulseActive = true;
-                SetActionValue(inputContext, kActionUseGadget, 1.0f);
-                g_nativeUseReleaseAt = GetTickCount64() + 34;
-                g_nativeUseReleasePending = true;
-            }
-        }
+    if (g_nativeProbeLevel.load() >= 2) {
+        LogGadgetLayout(g_native.getPlayerHero(), manager);
     }
 
     char line[160]{};
-    std::snprintf(line, sizeof(line), "Native selected slot %d (weapon id 0x%08X)",
-                  slot + 1, weaponId);
+    std::snprintf(line, sizeof(line),
+                  "Native gadget request %d captured; direct selector disabled pending layout mapping (fire=%d suppress=%d)",
+                  slot + 1, fire ? 1 : 0, suppressFaces ? 1 : 0);
     Log(line);
 }
 
