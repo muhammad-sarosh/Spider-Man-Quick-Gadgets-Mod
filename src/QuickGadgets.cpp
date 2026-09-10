@@ -51,6 +51,7 @@ struct Config {
     bool nativeDirectFire = true;
     bool controllerEnabled = true;
     int controllerIndex = -1;
+    WORD controllerModifier = 0x0100; // XINPUT_GAMEPAD_LEFT_SHOULDER.
     std::array<int, 4> controllerSlots{ 4, 3, 1, 2 }; // A, B, X, Y; zero-based.
     bool nativeProbe = false;
     int nativeProbeLevel = 1;
@@ -312,9 +313,9 @@ bool HookedQueryActionFlag(void* inputContext, std::uint32_t action, bool releas
             g_forceUseGadgetObserved = true;
             return true;
         }
-        // RB is the modifier for direct shortcuts. Block its ordinary
-        // Web-Shooter edge while held so it cannot mask the later gadget
-        // projectile. The forced edge above has priority.
+        // While the shortcut modifier is held, block an ordinary R1
+        // Web-Shooter edge so it cannot mask the later gadget projectile.
+        // The forced edge above has priority.
         if (g_controllerModifierHeld.load()) {
             g_physicalUseSuppressedObserved = true;
             return false;
@@ -1099,6 +1100,8 @@ Config LoadConfig() {
     config.controllerEnabled = ReadBool(L"Controller", L"Enabled", config.controllerEnabled, path);
     config.controllerIndex = std::clamp(
         ReadInt(L"Controller", L"Index", config.controllerIndex, path), -1, 3);
+    config.controllerModifier = static_cast<WORD>(ReadInt(
+        L"Controller", L"ModifierButton", config.controllerModifier, path));
     config.controllerSlots[0] = std::clamp(ReadInt(L"Controller", L"A", config.controllerSlots[0] + 1, path) - 1, 0, 7);
     config.controllerSlots[1] = std::clamp(ReadInt(L"Controller", L"B", config.controllerSlots[1] + 1, path) - 1, 0, 7);
     config.controllerSlots[2] = std::clamp(ReadInt(L"Controller", L"X", config.controllerSlots[2] + 1, path) - 1, 0, 7);
@@ -1212,7 +1215,7 @@ void Worker() {
             Log("Native UseGadget gameplay query intercepted");
         }
         if (g_physicalUseSuppressedObserved.exchange(false)) {
-            Log("Physical RB Web-Shooter action suppressed while modifier is held");
+            Log("Physical R1 Web-Shooter action suppressed while shortcut modifier is held");
         }
         if (g_forceUseGadgetPending &&
             GetTickCount64() > g_forceUseGadgetDeadline.load() &&
@@ -1277,13 +1280,12 @@ void Worker() {
                                       activeControllerIndex);
                         Log(line);
                     }
-                    constexpr WORD kRightShoulder = 0x0200;
                     constexpr WORD kFaces[] = { 0x1000, 0x2000, 0x4000, 0x8000 }; // A B X Y
                     constexpr WORD kFaceMask = 0xF000;
                     const WORD buttons = state.gamepad.buttons;
                     g_controllerModifierHeld =
-                        (buttons & kRightShoulder) != 0;
-                    const bool comboHeld = (buttons & kRightShoulder) &&
+                        (buttons & config.controllerModifier) != 0;
+                    const bool comboHeld = (buttons & config.controllerModifier) &&
                         (buttons & kFaceMask);
                     g_controllerComboHeld = comboHeld;
                     if (!comboHeld) g_nativeFireIssuedForCombo = false;

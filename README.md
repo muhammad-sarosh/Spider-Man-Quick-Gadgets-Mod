@@ -27,8 +27,9 @@ Alt + 1 through Alt + 8 use the native selector and native fire pulse when
 NativeDirectSelect and NativeDirectFire are enabled. These are physical test
 triggers only; the mod does not send those keys to the game.
 
-On an XInput-compatible controller, hold RB/R1 and press a face button. The
-default slot mapping is configurable in the Controller section:
+On an XInput-compatible controller, leave the game's Gadget Select Button on
+**Hold R1**, then hold LB/L1 and press a face button. The default slot mapping
+is configurable in the Controller section:
 
 - A/Cross: slot 5 (Web Bomb)
 - B/Circle: slot 4 (Electric Web)
