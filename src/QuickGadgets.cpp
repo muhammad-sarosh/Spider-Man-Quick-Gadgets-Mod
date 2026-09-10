@@ -46,6 +46,9 @@ struct Config {
     int inputDelayMs = 18;
     bool restoreWebShooter = false;
     bool keyboardWheelFallback = false;
+    bool nativeDirectSelect = true;
+    bool controllerEnabled = true;
+    std::array<int, 4> controllerSlots{ 4, 3, 1, 2 }; // A, B, X, Y; zero-based.
     bool nativeProbe = false;
     int nativeProbeLevel = 1;
     bool enabled = true;
@@ -189,6 +192,139 @@ NativeApi g_native;
 std::atomic_bool g_probeFinished = false;
 std::atomic_bool g_probeLoggedHero = false;
 std::atomic_int g_nativeProbeLevel = 1;
+std::atomic_int g_pendingNativeSlot = -1;
+std::atomic<void*> g_weaponManager = nullptr;
+std::atomic<void*> g_cachedHero = nullptr;
+
+// Verified against Spider-Man.exe 4.0630.0.0. The manager owns eight weapon
+// slots (40 bytes each) and the game's own setter accepts the weapon id stored
+// in one of those slots. This changes the active gadget without sending any
+// keyboard input or opening/cycling the wheel.
+constexpr std::uintptr_t kHeroWeaponManagerVtableRva = 0x38B55C8;
+constexpr std::uintptr_t kHeroWeaponManagerLocalVtableRva = 0x38B59B8;
+constexpr std::uintptr_t kHeroWeaponManagerRemoteVtableRva = 0x38B5B98;
+constexpr std::uintptr_t kSelectWeaponByIdRva = 0x09A5FF0;
+constexpr std::size_t kWeaponSlotBase = 0x6C;
+constexpr std::size_t kWeaponSlotStride = 0x28;
+
+bool ValidateNativeLayout() {
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    if (!module) return false;
+    constexpr std::uint8_t kExpectedSelectorBytes[] = {
+        0x85, 0xD2, 0x0F, 0x84, 0x0C, 0x01, 0x00, 0x00
+    };
+    return std::memcmp(reinterpret_cast<const void*>(module + kSelectWeaponByIdRva),
+                       kExpectedSelectorBytes, sizeof(kExpectedSelectorBytes)) == 0;
+}
+
+void* FindHeroWeaponManager(void* hero) {
+    if (g_cachedHero.load() != hero) {
+        g_weaponManager = nullptr;
+        g_cachedHero = hero;
+    }
+    if (void* cached = g_weaponManager.load()) return cached;
+    if (!hero || !g_native.getComponents) return nullptr;
+
+    PointerVector components{};
+    g_native.getComponents(&components, hero);
+    if (!components.begin || !components.end || components.end < components.begin) return nullptr;
+
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const std::uintptr_t expected[] = {
+        module + kHeroWeaponManagerVtableRva,
+        module + kHeroWeaponManagerLocalVtableRva,
+        module + kHeroWeaponManagerRemoteVtableRva,
+    };
+    const auto count = static_cast<std::size_t>(components.end - components.begin);
+    for (std::size_t i = 0; i < count && i < 512; ++i) {
+        void* component = components.begin[i];
+        if (!component) continue;
+        auto vtable = *reinterpret_cast<std::uintptr_t*>(component);
+        if (std::find(std::begin(expected), std::end(expected), vtable) == std::end(expected)) continue;
+        g_weaponManager = component;
+        char line[160]{};
+        std::snprintf(line, sizeof(line), "Found HeroWeaponManager at %p (vtable %p)",
+                      component, reinterpret_cast<void*>(vtable));
+        Log(line);
+        return component;
+    }
+    return nullptr;
+}
+
+void SelectNativeSlotOnGameThread() {
+    const int slot = g_pendingNativeSlot.exchange(-1);
+    if (slot < 0 || slot >= kGadgetCount || !g_native.getPlayerHero) return;
+
+    void* manager = FindHeroWeaponManager(g_native.getPlayerHero());
+    if (!manager) {
+        Log("Native select failed: HeroWeaponManager was not found");
+        return;
+    }
+
+    const auto slotAddress = reinterpret_cast<std::uintptr_t>(manager) +
+        kWeaponSlotBase + static_cast<std::size_t>(slot) * kWeaponSlotStride;
+    const auto weaponId = *reinterpret_cast<const std::uint32_t*>(slotAddress);
+    if (!weaponId) {
+        char line[128]{};
+        std::snprintf(line, sizeof(line), "Native slot %d is empty or locked", slot + 1);
+        Log(line);
+        return;
+    }
+
+    using SelectWeaponByIdFn = void (*)(void*, std::uint32_t);
+    const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const auto selectWeapon =
+        reinterpret_cast<SelectWeaponByIdFn>(module + kSelectWeaponByIdRva);
+    selectWeapon(manager, weaponId);
+
+    char line[160]{};
+    std::snprintf(line, sizeof(line), "Native selected slot %d (weapon id 0x%08X)",
+                  slot + 1, weaponId);
+    Log(line);
+}
+
+bool QueueNativeSlot(int slot) {
+    int expected = -1;
+    if (!g_native.gameMainThreadCall ||
+        !g_pendingNativeSlot.compare_exchange_strong(expected, slot)) {
+        return false;
+    }
+    g_native.gameMainThreadCall(&SelectNativeSlotOnGameThread);
+    return true;
+}
+
+struct XInputGamepad {
+    WORD buttons;
+    BYTE leftTrigger;
+    BYTE rightTrigger;
+    SHORT thumbLX;
+    SHORT thumbLY;
+    SHORT thumbRX;
+    SHORT thumbRY;
+};
+
+struct XInputState {
+    DWORD packetNumber;
+    XInputGamepad gamepad;
+};
+
+using XInputGetStateFn = DWORD (WINAPI*)(DWORD, XInputState*);
+
+XInputGetStateFn ResolveXInputGetState() {
+    constexpr const char* kModules[] = {
+        "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"
+    };
+    for (const char* name : kModules) {
+        HMODULE module = GetModuleHandleA(name);
+        if (!module) module = LoadLibraryA(name);
+        if (module) {
+            if (const auto proc = GetProcAddress(module, "XInputGetState")) {
+                return reinterpret_cast<XInputGetStateFn>(proc);
+            }
+        }
+    }
+    return nullptr;
+}
 
 void ProbeComponentsOnGameThread() {
     if (!g_running || !g_native.getPlayerHero) return;
@@ -353,6 +489,12 @@ Config LoadConfig() {
     config.inputDelayMs = std::max(1, ReadInt(L"QuickGadgets", L"InputDelayMs", config.inputDelayMs, path));
     config.restoreWebShooter = ReadBool(L"QuickGadgets", L"RestoreWebShooter", config.restoreWebShooter, path);
     config.keyboardWheelFallback = ReadBool(L"QuickGadgets", L"KeyboardWheelFallback", config.keyboardWheelFallback, path);
+    config.nativeDirectSelect = ReadBool(L"QuickGadgets", L"NativeDirectSelect", config.nativeDirectSelect, path);
+    config.controllerEnabled = ReadBool(L"Controller", L"Enabled", config.controllerEnabled, path);
+    config.controllerSlots[0] = std::clamp(ReadInt(L"Controller", L"A", config.controllerSlots[0] + 1, path) - 1, 0, 7);
+    config.controllerSlots[1] = std::clamp(ReadInt(L"Controller", L"B", config.controllerSlots[1] + 1, path) - 1, 0, 7);
+    config.controllerSlots[2] = std::clamp(ReadInt(L"Controller", L"X", config.controllerSlots[2] + 1, path) - 1, 0, 7);
+    config.controllerSlots[3] = std::clamp(ReadInt(L"Controller", L"Y", config.controllerSlots[3] + 1, path) - 1, 0, 7);
     config.nativeProbe = ReadBool(L"QuickGadgets", L"NativeProbe", config.nativeProbe, path);
     config.nativeProbeLevel = std::clamp(ReadInt(L"QuickGadgets", L"NativeProbeLevel",
                                                  config.nativeProbeLevel, path), 1, 5);
@@ -397,6 +539,7 @@ bool Down(WORD key) {
 
 void Worker() {
     bool keyboardWheelFallback = false;
+    bool nativeDirectSelect = false;
     bool nativeProbe = false;
     int nativeProbeLevel = 1;
     {
@@ -404,12 +547,24 @@ void Worker() {
         g_config = LoadConfig();
         g_enabled = g_config.enabled;
         keyboardWheelFallback = g_config.keyboardWheelFallback;
+        nativeDirectSelect = g_config.nativeDirectSelect;
         nativeProbe = g_config.nativeProbe;
         nativeProbeLevel = g_config.nativeProbeLevel;
     }
     Log(keyboardWheelFallback
         ? "Quick Gadgets enabled. Keyboard wheel fallback is ON."
         : "Quick Gadgets enabled. Native route only; keyboard wheel fallback is OFF.");
+    if (nativeDirectSelect) {
+        if (!g_native.Resolve() || !g_native.getComponents) {
+            nativeDirectSelect = false;
+            Log("Native direct select unavailable: required Script Hook exports are missing");
+        } else if (!ValidateNativeLayout()) {
+            nativeDirectSelect = false;
+            Log("Native direct select disabled: Spider-Man.exe layout does not match 4.0630.0.0");
+        } else {
+            Log("Native direct select armed for Spider-Man.exe 4.0630.0.0");
+        }
+    }
     if (nativeProbe) {
         g_nativeProbeLevel = nativeProbeLevel;
         std::thread(NativeProbeWorker).detach();
@@ -420,6 +575,8 @@ void Worker() {
     bool modifierWasDown = false;
     bool modifierUsed = false;
     auto modifierDownAt = std::chrono::steady_clock::now();
+    const auto xinputGetState = ResolveXInputGetState();
+    WORD previousControllerButtons = 0;
 
     while (g_running) {
         Config config;
@@ -431,6 +588,36 @@ void Worker() {
         if (Pressed(config.toggleKey)) {
             g_enabled = !g_enabled;
             Log(g_enabled ? "Quick Gadgets: enabled" : "Quick Gadgets: disabled");
+        }
+
+        if (nativeDirectSelect && g_enabled) {
+            if (Down(config.modifier)) {
+                for (int target = 0; target < kGadgetCount; ++target) {
+                    if (Pressed(config.slotKeys[target])) {
+                        QueueNativeSlot(target);
+                        break;
+                    }
+                }
+            }
+
+            if (config.controllerEnabled && xinputGetState) {
+                XInputState state{};
+                if (xinputGetState(0, &state) == ERROR_SUCCESS) {
+                    constexpr WORD kRightShoulder = 0x0200;
+                    constexpr WORD kFaces[] = { 0x1000, 0x2000, 0x4000, 0x8000 }; // A B X Y
+                    const WORD buttons = state.gamepad.buttons;
+                    if (buttons & kRightShoulder) {
+                        for (int face = 0; face < 4; ++face) {
+                            if ((buttons & kFaces[face]) &&
+                                !(previousControllerButtons & kFaces[face])) {
+                                QueueNativeSlot(config.controllerSlots[face]);
+                                break;
+                            }
+                        }
+                    }
+                    previousControllerButtons = buttons;
+                }
+            }
         }
 
         if (!config.keyboardWheelFallback) {
