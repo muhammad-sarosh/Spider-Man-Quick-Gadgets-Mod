@@ -223,6 +223,7 @@ constexpr std::uintptr_t kHeroWeaponManagerLocalVtableRva = 0x38B59B8;
 constexpr std::uintptr_t kHeroWeaponManagerRemoteVtableRva = 0x38B5B98;
 constexpr std::uintptr_t kSelectWeaponByIdRva = 0x09A5FF0;
 constexpr std::uintptr_t kSelectWeaponAndNotifyRva = 0x09A4110;
+constexpr std::uintptr_t kSetActiveWeaponRva = 0x2161A10;
 constexpr std::uintptr_t kResolveAssetHandleRva = 0x15A0560;
 constexpr std::uintptr_t kResolveHandleRva = 0x16798F0;
 constexpr std::uintptr_t kConsumeActionRva = 0x09097C0;
@@ -523,6 +524,10 @@ bool ValidateNativeLayout() {
     constexpr std::uint8_t kExpectedNotifyBytes[] = {
         0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x81
     };
+    constexpr std::uint8_t kExpectedActiveWeaponSetterBytes[] = {
+        0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74,
+        0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x30
+    };
     constexpr std::uint8_t kExpectedResolverBytes[] = {
         0x8B, 0x11, 0x8B, 0xCA, 0xC1, 0xE9, 0x14, 0x85
     };
@@ -536,6 +541,9 @@ bool ValidateNativeLayout() {
                        kExpectedSelectorBytes, sizeof(kExpectedSelectorBytes)) == 0 &&
         std::memcmp(reinterpret_cast<const void*>(module + kSelectWeaponAndNotifyRva),
                     kExpectedNotifyBytes, sizeof(kExpectedNotifyBytes)) == 0 &&
+        std::memcmp(reinterpret_cast<const void*>(module + kSetActiveWeaponRva),
+                    kExpectedActiveWeaponSetterBytes,
+                    sizeof(kExpectedActiveWeaponSetterBytes)) == 0 &&
         std::memcmp(reinterpret_cast<const void*>(module + kResolveHandleRva),
                     kExpectedResolverBytes, sizeof(kExpectedResolverBytes)) == 0 &&
         std::memcmp(reinterpret_cast<const void*>(module + kResolveAssetHandleRva),
@@ -759,23 +767,42 @@ void SelectNativeSlotOnGameThread() {
         return;
     }
 
-    using SelectWeaponAndNotifyFn = void (*)(void*, std::uint32_t);
+    using SetActiveWeaponFn = bool (*)(void*, std::uint32_t, std::uint32_t, bool);
     const auto module = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-    const auto selectWeaponAndNotify =
-        reinterpret_cast<SelectWeaponAndNotifyFn>(module + kSelectWeaponAndNotifyRva);
+    const auto setActiveWeapon =
+        reinterpret_cast<SetActiveWeaponFn>(module + kSetActiveWeaponRva);
 
-    // A normal wheel selection assigns both of these fields before invoking
-    // the activation/notification wrapper. The wrapper intentionally skips
-    // its follow-up branch when the requested ID is not already active.
+    // Use the generic equipment manager transition used by the wheel. It
+    // deactivates the prior weapon object, updates slot 0, activates the new
+    // object, and dispatches the HeroWeaponManager callbacks. Writing +6C and
+    // calling the notification wrapper only changed bookkeeping/UI state and
+    // left the gameplay fire handler attached to Web Shooter.
     const auto managerAddress = reinterpret_cast<std::uintptr_t>(manager);
-    auto* activeSlot0 = reinterpret_cast<std::uint32_t*>(
+    const std::uint32_t previousWeaponId = *reinterpret_cast<std::uint32_t*>(
         managerAddress + kActiveWeaponSlot0Offset);
-    auto* gadgetOverride = reinterpret_cast<std::uint32_t*>(
-        managerAddress + kGadgetOverrideOffset);
-    const std::uint32_t previousWeaponId = *activeSlot0;
-    *activeSlot0 = weaponId;
-    *gadgetOverride = weaponId;
-    selectWeaponAndNotify(manager, weaponId);
+
+    // Earlier diagnostic builds could leave +6C claiming Impact Web while the
+    // live weapon object was still Web Shooter. Force a real transition away
+    // and back when the requested ID already occupies the slot.
+    bool repairedStaleSelection = false;
+    if (previousWeaponId == weaponId && slot != WebShooter) {
+        const std::uint32_t webShooterId = FindGadgetWeaponId(
+            manager, WebShooter, nullptr);
+        if (webShooterId && webShooterId != weaponId) {
+            repairedStaleSelection = setActiveWeapon(
+                manager, webShooterId, 0, true);
+        }
+    }
+    const bool selected = setActiveWeapon(manager, weaponId, 0, true);
+
+    if (!selected) {
+        char line[192]{};
+        std::snprintf(line, sizeof(line),
+                      "Native equipment transition rejected slot %d (%s, weapon id 0x%08X)",
+                      slot + 1, gadgetName ? gadgetName : "<unknown>", weaponId);
+        Log(line);
+        return;
+    }
 
     if (fire || suppressFaces) {
         void* inputContext = ResolveInputContext(manager);
@@ -797,11 +824,12 @@ void SelectNativeSlotOnGameThread() {
         }
     }
 
-    char line[160]{};
+    char line[192]{};
     std::snprintf(line, sizeof(line),
-                  "Native selected slot %d (%s, weapon id 0x%08X, previous 0x%08X)%s",
+                  "Native transitioned slot %d (%s, weapon id 0x%08X, previous 0x%08X)%s%s",
                   slot + 1, gadgetName ? gadgetName : "<unknown>", weaponId,
                   previousWeaponId,
+                  repairedStaleSelection ? ", repaired stale active id" : "",
                   fire ? " and pulsed UseGadget" : "");
     Log(line);
 }
