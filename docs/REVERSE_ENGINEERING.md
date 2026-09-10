@@ -32,6 +32,13 @@ requested gadget by name, and passes that record's ID to the wrapper at
 0x09A4110. This keeps the mapping valid when gadgets are locked or IDs differ
 between sessions.
 
+The native shortcut path uses the generic equipment transition at RVA
+0x2161A10 to replace the live weapon object. Automatic restoration additionally
+publishes the Web Shooter ID at manager + 0x790 and calls the wrapper at
+0x09A4110. The additional steps synchronize the gadget-wheel HUD and ammo model;
+using only the generic transition left a functional Web Shooter paired with a
+stale empty/red ammo display.
+
 A live before/after comparison of a normal wheel change from Impact Web to
 Spider Drone showed that the game assigns the selected ID to active equip slot
 0 (manager + 0x6C) and to the gadget override (manager + 0x790). The selection

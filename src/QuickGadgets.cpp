@@ -233,6 +233,7 @@ constexpr int kNoNativeRequest = -1;
 constexpr int kNativeRequestSlotMask = 0xFF;
 constexpr int kNativeRequestFire = 0x100;
 constexpr int kNativeRequestSuppressFaces = 0x200;
+constexpr int kNativeRequestFinalizeWheelState = 0x400;
 std::atomic_int g_pendingNativeRequest = kNoNativeRequest;
 std::atomic_bool g_controllerComboHeld = false;
 std::atomic_bool g_controllerModifierHeld = false;
@@ -1055,6 +1056,8 @@ void SelectNativeSlotOnGameThread() {
     const int slot = request & kNativeRequestSlotMask;
     const bool fire = (request & kNativeRequestFire) != 0;
     const bool suppressFaces = (request & kNativeRequestSuppressFaces) != 0;
+    const bool finalizeWheelState =
+        (request & kNativeRequestFinalizeWheelState) != 0;
     if (slot < 0 || slot >= kGadgetCount || !g_native.getPlayerHero) return;
 
     void* manager = FindHeroWeaponManager(g_native.getPlayerHero());
@@ -1108,6 +1111,21 @@ void SelectNativeSlotOnGameThread() {
         return;
     }
 
+    if (finalizeWheelState) {
+        // SetActiveWeapon transitions the live gameplay object, but a normal
+        // wheel selection also publishes the gadget override and invokes the
+        // HeroWeaponManager notification wrapper. Without these two steps the
+        // restored Web Shooter can fire while its HUD/ammo model remains bound
+        // to the gadget that was active before restoration.
+        *reinterpret_cast<std::uint32_t*>(
+            managerAddress + kGadgetOverrideOffset) = weaponId;
+        using SelectWeaponAndNotifyFn = void (*)(void*, std::uint32_t);
+        const auto selectWeaponAndNotify =
+            reinterpret_cast<SelectWeaponAndNotifyFn>(
+                module + kSelectWeaponAndNotifyRva);
+        selectWeaponAndNotify(manager, weaponId);
+    }
+
     if (fire || suppressFaces) {
         void* inputContext = ResolveInputContext(manager);
         if (!inputContext) {
@@ -1132,12 +1150,13 @@ void SelectNativeSlotOnGameThread() {
         }
     }
 
-    char line[192]{};
+    char line[256]{};
     std::snprintf(line, sizeof(line),
-                  "Native transitioned slot %d (%s, weapon id 0x%08X, previous 0x%08X)%s%s",
+                  "Native transitioned slot %d (%s, weapon id 0x%08X, previous 0x%08X)%s%s%s",
                   slot + 1, gadgetName ? gadgetName : "<unknown>", weaponId,
                   previousWeaponId,
                   alreadyActive ? ", already active" : "",
+                  finalizeWheelState ? ", synchronized wheel HUD/ammo" : "",
                   fire ? " and queued delayed UseGadget" : "");
     Log(line);
 }
@@ -1159,12 +1178,14 @@ void SuppressControllerComboOnGameThread() {
     g_suppressionCallbackQueued = false;
 }
 
-bool QueueNativeSlot(int slot, bool fire, bool suppressFaces) {
+bool QueueNativeSlot(int slot, bool fire, bool suppressFaces,
+                     bool finalizeWheelState = false) {
     if (!g_native.gameMainThreadCall || slot < 0 || slot >= kGadgetCount) return false;
 
     const int request = slot |
         (fire ? kNativeRequestFire : 0) |
-        (suppressFaces ? kNativeRequestSuppressFaces : 0);
+        (suppressFaces ? kNativeRequestSuppressFaces : 0) |
+        (finalizeWheelState ? kNativeRequestFinalizeWheelState : 0);
     int expected = kNoNativeRequest;
     if (!g_pendingNativeRequest.compare_exchange_strong(expected, request)) return false;
 
@@ -1505,7 +1526,7 @@ void Worker() {
             !shortcutModifierHeld &&
             !g_delayedNativeFirePending.load() &&
             !g_forceUseGadgetPending.load()) {
-            if (QueueNativeSlot(WebShooter, false, false)) {
+            if (QueueNativeSlot(WebShooter, false, false, true)) {
                 g_nativeRestorePending = false;
                 Log("Repeat window ended; restoring Web Shooter");
             }
