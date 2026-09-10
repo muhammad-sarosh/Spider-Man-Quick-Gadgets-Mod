@@ -58,6 +58,26 @@ struct Config {
     bool enabled = true;
 };
 
+struct XInputGamepad {
+    WORD buttons;
+    BYTE leftTrigger;
+    BYTE rightTrigger;
+    SHORT thumbLX;
+    SHORT thumbLY;
+    SHORT thumbRX;
+    SHORT thumbRY;
+};
+
+struct XInputState {
+    DWORD packetNumber;
+    XInputGamepad gamepad;
+};
+
+static_assert(sizeof(XInputGamepad) == 12);
+static_assert(sizeof(XInputState) == 16);
+
+using XInputGetStateFn = DWORD (WINAPI*)(DWORD, XInputState*);
+
 Config g_config;
 std::mutex g_configMutex;
 std::atomic_bool g_running = true;
@@ -208,6 +228,12 @@ std::atomic_int g_pendingNativeRequest = kNoNativeRequest;
 std::atomic_bool g_controllerComboHeld = false;
 std::atomic_bool g_controllerModifierHeld = false;
 std::atomic_bool g_controllerFaceSuppressionLatched = false;
+std::atomic_bool g_faceActionSuppressedObserved = false;
+std::atomic_bool g_faceActionSuppressionReported = false;
+std::atomic<XInputGetStateFn> g_xinputGetState = nullptr;
+std::atomic_int g_activeControllerIndex = -1;
+std::atomic_int g_configuredControllerIndex = -1;
+std::atomic_uint g_controllerModifierMask = 0x0100;
 std::atomic_bool g_nativeFireIssuedForCombo = false;
 std::atomic_bool g_suppressionCallbackQueued = false;
 std::atomic_bool g_physicalUseSuppressedObserved = false;
@@ -299,6 +325,41 @@ bool IsControllerFaceAction(std::uint32_t action) {
         action == kActionWebStrike;
 }
 
+bool IsShortcutModifierPhysicallyHeld() {
+    const auto getState = g_xinputGetState.load();
+    if (!getState) return false;
+
+    XInputState state{};
+    const WORD modifier = static_cast<WORD>(g_controllerModifierMask.load());
+    int index = g_configuredControllerIndex.load();
+    if (index < 0) index = g_activeControllerIndex.load();
+    if (index >= 0 && index < 4 &&
+        getState(static_cast<DWORD>(index), &state) == ERROR_SUCCESS) {
+        return (state.gamepad.buttons & modifier) != 0;
+    }
+
+    for (DWORD candidate = 0; candidate < 4; ++candidate) {
+        if (getState(candidate, &state) == ERROR_SUCCESS &&
+            (state.gamepad.buttons & modifier) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ShouldSuppressControllerFaceAction(std::uint32_t action) {
+    if (!IsControllerFaceAction(action)) return false;
+    if (!g_controllerFaceSuppressionLatched.load() &&
+        !IsShortcutModifierPhysicallyHeld()) {
+        return false;
+    }
+    g_controllerFaceSuppressionLatched = true;
+    if (!g_faceActionSuppressionReported.exchange(true)) {
+        g_faceActionSuppressedObserved = true;
+    }
+    return true;
+}
+
 void* HookedGameplayActionReader(void* owner, void* output, void* actionTable,
                                  float threshold, void* selector) {
     void* result = g_originalGameplayActionReader
@@ -315,8 +376,7 @@ void* HookedGameplayActionReader(void* owner, void* output, void* actionTable,
             // boundary where gameplay reads it. The earlier asynchronous
             // ConsumeAction callback raced the game update, allowing the
             // gadget and dodge/jump/attack to happen together.
-            if (g_controllerFaceSuppressionLatched.load() &&
-                IsControllerFaceAction(action)) {
+            if (ShouldSuppressControllerFaceAction(action)) {
                 std::memset(output, 0, sizeof(std::uint32_t));
             }
             if (action == kActionUseGadget) {
@@ -417,8 +477,7 @@ void RemoveGameplayActionReaderHook() {
 
 bool HookedQueryAction(void* inputContext, std::uint32_t action, float threshold,
                        bool allowHeld, bool useTimeWindow) {
-    if (g_controllerFaceSuppressionLatched.load() &&
-        IsControllerFaceAction(action)) {
+    if (ShouldSuppressControllerFaceAction(action)) {
         return false;
     }
     return g_originalQueryAction
@@ -428,8 +487,7 @@ bool HookedQueryAction(void* inputContext, std::uint32_t action, float threshold
 
 bool HookedQueryActionWindow(void* inputContext, std::uint32_t action,
                              float minimum, float maximum, bool allowHeld) {
-    if (g_controllerFaceSuppressionLatched.load() &&
-        IsControllerFaceAction(action)) {
+    if (ShouldSuppressControllerFaceAction(action)) {
         return false;
     }
     return g_originalQueryActionWindow
@@ -439,8 +497,7 @@ bool HookedQueryActionWindow(void* inputContext, std::uint32_t action,
 
 bool HookedQueryActionRange(void* inputContext, std::uint32_t action,
                             float minimum, float maximum, bool allowHeld) {
-    if (g_controllerFaceSuppressionLatched.load() &&
-        IsControllerFaceAction(action)) {
+    if (ShouldSuppressControllerFaceAction(action)) {
         return false;
     }
     return g_originalQueryActionRange
@@ -449,8 +506,7 @@ bool HookedQueryActionRange(void* inputContext, std::uint32_t action,
 }
 
 bool HookedQueryActionFlag(void* inputContext, std::uint32_t action, bool released) {
-    if (g_controllerFaceSuppressionLatched.load() &&
-        IsControllerFaceAction(action)) {
+    if (ShouldSuppressControllerFaceAction(action)) {
         return false;
     }
     if (action == kActionUseGadget) {
@@ -1103,26 +1159,6 @@ bool QueueNativeSlot(int slot, bool fire, bool suppressFaces) {
     return true;
 }
 
-struct XInputGamepad {
-    WORD buttons;
-    BYTE leftTrigger;
-    BYTE rightTrigger;
-    SHORT thumbLX;
-    SHORT thumbLY;
-    SHORT thumbRX;
-    SHORT thumbRY;
-};
-
-struct XInputState {
-    DWORD packetNumber;
-    XInputGamepad gamepad;
-};
-
-static_assert(sizeof(XInputGamepad) == 12);
-static_assert(sizeof(XInputState) == 16);
-
-using XInputGetStateFn = DWORD (WINAPI*)(DWORD, XInputState*);
-
 XInputGetStateFn ResolveXInputGetState() {
     constexpr const char* kModules[] = {
         "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"
@@ -1410,6 +1446,9 @@ void Worker() {
     bool modifierUsed = false;
     auto modifierDownAt = std::chrono::steady_clock::now();
     const auto xinputGetState = ResolveXInputGetState();
+    g_xinputGetState = xinputGetState;
+    g_configuredControllerIndex = g_config.controllerIndex;
+    g_controllerModifierMask = g_config.controllerModifier;
     if (xinputGetState) {
         Log("XInput controller polling is available");
     } else {
@@ -1430,6 +1469,9 @@ void Worker() {
         }
         if (g_physicalUseSuppressedObserved.exchange(false)) {
             Log("Physical R1 Web-Shooter action suppressed while shortcut modifier is held");
+        }
+        if (g_faceActionSuppressedObserved.exchange(false)) {
+            Log("Native face-button action suppressed while shortcut modifier is held");
         }
         if (g_forceUseGadgetPending &&
             GetTickCount64() > g_forceUseGadgetDeadline.load() &&
@@ -1510,6 +1552,7 @@ void Worker() {
                 if (connected) {
                     if (activeControllerIndex != candidateIndex) {
                         activeControllerIndex = candidateIndex;
+                        g_activeControllerIndex = candidateIndex;
                         previousControllerButtons = 0;
                         char line[96]{};
                         std::snprintf(line, sizeof(line), "Using XInput controller index %d",
@@ -1533,6 +1576,7 @@ void Worker() {
                         // first; clear it only after the physical face button
                         // has also returned to neutral.
                         g_controllerFaceSuppressionLatched = false;
+                        g_faceActionSuppressionReported = false;
                     }
                     if (!comboHeld) g_nativeFireIssuedForCombo = false;
                     if (comboHeld) {
@@ -1551,9 +1595,11 @@ void Worker() {
                     previousControllerButtons = buttons;
                 } else {
                     activeControllerIndex = -1;
+                    g_activeControllerIndex = -1;
                     g_controllerComboHeld = false;
                     g_controllerModifierHeld = false;
                     g_controllerFaceSuppressionLatched = false;
+                    g_faceActionSuppressionReported = false;
                     previousControllerButtons = 0;
                 }
             }
@@ -1626,6 +1672,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         g_running = false;
         g_controllerModifierHeld = false;
         g_controllerFaceSuppressionLatched = false;
+        g_faceActionSuppressionReported = false;
+        g_xinputGetState = nullptr;
+        g_activeControllerIndex = -1;
         g_delayedNativeFirePending = false;
         g_forceUseGadgetPending = false;
         RemoveGameplayActionReaderHook();
