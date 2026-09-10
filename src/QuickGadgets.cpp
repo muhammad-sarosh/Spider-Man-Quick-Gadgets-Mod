@@ -194,9 +194,14 @@ NativeApi g_native;
 std::atomic_bool g_probeFinished = false;
 std::atomic_bool g_probeLoggedHero = false;
 std::atomic_int g_nativeProbeLevel = 1;
-std::atomic_int g_pendingNativeSlot = -1;
-std::atomic_bool g_pendingNativeFire = false;
-std::atomic_bool g_pendingSuppressFaces = false;
+// Keep a queued request coherent across the worker and game threads. Separate
+// atomics allowed the callback to observe a new slot before its fire/suppress
+// flags had been published.
+constexpr int kNoNativeRequest = -1;
+constexpr int kNativeRequestSlotMask = 0xFF;
+constexpr int kNativeRequestFire = 0x100;
+constexpr int kNativeRequestSuppressFaces = 0x200;
+std::atomic_int g_pendingNativeRequest = kNoNativeRequest;
 std::atomic_bool g_nativeUseReleasePending = false;
 std::atomic_ullong g_nativeUseReleaseAt = 0;
 std::atomic_bool g_nativeFirePulseActive = false;
@@ -311,7 +316,12 @@ void* FindHeroWeaponManager(void* hero) {
 }
 
 void SelectNativeSlotOnGameThread() {
-    const int slot = g_pendingNativeSlot.exchange(-1);
+    const int request = g_pendingNativeRequest.exchange(kNoNativeRequest);
+    if (request == kNoNativeRequest) return;
+
+    const int slot = request & kNativeRequestSlotMask;
+    const bool fire = (request & kNativeRequestFire) != 0;
+    const bool suppressFaces = (request & kNativeRequestSuppressFaces) != 0;
     if (slot < 0 || slot >= kGadgetCount || !g_native.getPlayerHero) return;
 
     void* manager = FindHeroWeaponManager(g_native.getPlayerHero());
@@ -336,8 +346,6 @@ void SelectNativeSlotOnGameThread() {
         reinterpret_cast<SelectWeaponAndNotifyFn>(module + kSelectWeaponAndNotifyRva);
     selectWeaponAndNotify(manager, weaponId);
 
-    const bool suppressFaces = g_pendingSuppressFaces.exchange(false);
-    const bool fire = g_pendingNativeFire.exchange(false);
     if (fire || suppressFaces) {
         void* inputContext = ResolveInputContext(manager);
         if (!inputContext) {
@@ -384,13 +392,14 @@ void SuppressControllerComboOnGameThread() {
 }
 
 bool QueueNativeSlot(int slot, bool fire, bool suppressFaces) {
-    int expected = -1;
-    if (!g_native.gameMainThreadCall ||
-        !g_pendingNativeSlot.compare_exchange_strong(expected, slot)) {
-        return false;
-    }
-    g_pendingNativeFire = fire;
-    g_pendingSuppressFaces = suppressFaces;
+    if (!g_native.gameMainThreadCall || slot < 0 || slot >= kGadgetCount) return false;
+
+    const int request = slot |
+        (fire ? kNativeRequestFire : 0) |
+        (suppressFaces ? kNativeRequestSuppressFaces : 0);
+    int expected = kNoNativeRequest;
+    if (!g_pendingNativeRequest.compare_exchange_strong(expected, request)) return false;
+
     g_native.gameMainThreadCall(&SelectNativeSlotOnGameThread);
     return true;
 }

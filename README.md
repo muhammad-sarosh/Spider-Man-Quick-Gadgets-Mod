@@ -14,7 +14,6 @@ and is disabled by default because it is not suitable for controller play.
 
 | Shortcut | Gadget |
 | --- | --- |
-| `Alt` tap | Web Shooter |
 | `Alt + 1` | Web Shooter |
 | `Alt + 2` | Impact Web |
 | `Alt + 3` | Spider Drone |
@@ -45,6 +44,11 @@ F10 enables or disables the mod.
 2. Build the package CMake target. Copy QuickGadgets.script and
    QuickGadgets.ini into the game's scripts folder.
 3. Launch the game through the Script Hook/community loader.
+
+During development, fully close the game before replacing QuickGadgets.script.
+Script Hook documents Insert as an unload/reload command, but does not expose a
+documented script shutdown callback; this mod owns a polling worker, so process
+restart is the safe way to load a newly compiled DLL.
 
 Only the optional KeyboardWheelFallback needs the game's Previous Gadget,
 Next Gadget, and Use Gadget keyboard bindings. Leave that fallback disabled
@@ -79,6 +83,21 @@ and fires it. This path is intentionally stateless but remains keyboard-only.
 RestoreWebShooter currently applies only to the legacy wheel fallback. Native
 auto-restore is intentionally deferred until direct selection and firing have
 been validated in-game.
+
+## Offline layout verification
+
+Before installing a build, verify that the installed executable still matches
+the exact 4.0630.0.0 native layout this mod targets:
+
+```powershell
+python tools/verify_game_layout.py `
+  "S:\Steam\steamapps\common\Marvel's Spider-Man Remastered\Spider-Man.exe"
+```
+
+The verifier checks the executable hash, all called function signatures,
+HeroWeaponManager vtable entries, and the embedded input-action names/hashes.
+Technical evidence and current limitations are recorded in
+`docs/REVERSE_ENGINEERING.md`.
 
 The native controller path clears Attack, Dodge, Jump, and Web Strike through
 the engine action system during the gadget pulse. This is an experimental
