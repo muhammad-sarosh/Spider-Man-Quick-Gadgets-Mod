@@ -6,3 +6,5 @@ out/
 *.ilk
 __pycache__/
 *.pyc
+docs/NEXUS.md
+docs/GITHUB_RELEASE.md

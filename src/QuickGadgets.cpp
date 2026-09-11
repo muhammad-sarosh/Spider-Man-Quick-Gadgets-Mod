@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <fstream>
 #include <intrin.h>
 #include <mutex>
@@ -1364,6 +1365,39 @@ bool ReadBool(const wchar_t* section, const wchar_t* key, bool fallback, const s
     return ReadInt(section, key, fallback ? 1 : 0, path) != 0;
 }
 
+constexpr const wchar_t* kGadgetConfigNames[kGadgetCount] = {
+    L"WebShooter", L"ImpactWeb", L"SpiderDrone", L"ElectricWeb",
+    L"WebBomb", L"TripMine", L"ConcussiveBlast", L"SuspensionMatrix",
+};
+
+int ReadControllerBinding(const wchar_t* key, int fallback,
+                          const std::wstring& path) {
+    wchar_t value[64]{};
+    GetPrivateProfileStringW(L"ControllerBindings", key, L"", value,
+                             static_cast<DWORD>(std::size(value)), path.c_str());
+
+    if (value[0] == L'\0') {
+        // Backward compatibility with development INIs that stored wheel
+        // positions (1-8) in the [Controller] section.
+        return std::clamp(
+            ReadInt(L"Controller", key, fallback + 1, path) - 1, 0, 7);
+    }
+    if (_wcsicmp(value, L"None") == 0 ||
+        _wcsicmp(value, L"Disabled") == 0) return -1;
+
+    for (int slot = 0; slot < kGadgetCount; ++slot) {
+        if (_wcsicmp(value, kGadgetConfigNames[slot]) == 0) return slot;
+    }
+
+    // Numeric values remain accepted so older user configurations still work.
+    wchar_t* end = nullptr;
+    const long numeric = std::wcstol(value, &end, 10);
+    if (end && *end == L'\0' && numeric >= 1 && numeric <= 8) {
+        return static_cast<int>(numeric - 1);
+    }
+    return fallback;
+}
+
 Config LoadConfig() {
     const std::wstring path = GetModuleDirectory() + L"\\QuickGadgets.ini";
     Config config;
@@ -1381,23 +1415,20 @@ Config LoadConfig() {
     config.controllerEnabled = ReadBool(L"Controller", L"Enabled", config.controllerEnabled, path);
     config.controllerIndex = std::clamp(
         ReadInt(L"Controller", L"Index", config.controllerIndex, path), -1, 3);
-    auto readControllerSlot = [&](const wchar_t* key, int fallback) {
-        return std::clamp(ReadInt(L"Controller", key, fallback + 1, path) - 1, 0, 7);
-    };
-    config.controllerL1TapSlot = readControllerSlot(
-        L"L1Tap", config.controllerL1TapSlot);
-    config.controllerDpadLeftSlot = readControllerSlot(
-        L"DpadLeft", config.controllerDpadLeftSlot);
-    config.controllerDpadRightSlot = readControllerSlot(
-        L"DpadRight", config.controllerDpadRightSlot);
-    config.controllerL1DpadLeftSlot = readControllerSlot(
-        L"L1DpadLeft", config.controllerL1DpadLeftSlot);
-    config.controllerL1DpadRightSlot = readControllerSlot(
-        L"L1DpadRight", config.controllerL1DpadRightSlot);
-    config.controllerL2DpadLeftSlot = readControllerSlot(
-        L"L2DpadLeft", config.controllerL2DpadLeftSlot);
-    config.controllerL2DpadRightSlot = readControllerSlot(
-        L"L2DpadRight", config.controllerL2DpadRightSlot);
+    config.controllerL1TapSlot = ReadControllerBinding(
+        L"L1Tap", config.controllerL1TapSlot, path);
+    config.controllerDpadLeftSlot = ReadControllerBinding(
+        L"DpadLeft", config.controllerDpadLeftSlot, path);
+    config.controllerDpadRightSlot = ReadControllerBinding(
+        L"DpadRight", config.controllerDpadRightSlot, path);
+    config.controllerL1DpadLeftSlot = ReadControllerBinding(
+        L"L1DpadLeft", config.controllerL1DpadLeftSlot, path);
+    config.controllerL1DpadRightSlot = ReadControllerBinding(
+        L"L1DpadRight", config.controllerL1DpadRightSlot, path);
+    config.controllerL2DpadLeftSlot = ReadControllerBinding(
+        L"L2DpadLeft", config.controllerL2DpadLeftSlot, path);
+    config.controllerL2DpadRightSlot = ReadControllerBinding(
+        L"L2DpadRight", config.controllerL2DpadRightSlot, path);
     config.controllerL1TapMaxMs = std::clamp(
         ReadInt(L"Controller", L"L1TapMaxMs", config.controllerL1TapMaxMs, path),
         100, 1500);
@@ -1405,14 +1436,20 @@ Config LoadConfig() {
         ReadInt(L"Controller", L"L2Threshold", config.controllerL2Threshold, path),
         1, 255));
     config.nativeAutoRestore = ReadBool(
-        L"Controller", L"AutoRestoreWebShooter", config.nativeAutoRestore, path);
+        L"General", L"AutoRestoreWebShooter",
+        ReadBool(L"Controller", L"AutoRestoreWebShooter",
+                 config.nativeAutoRestore, path), path);
     config.nativeRepeatWindowMs = std::clamp(
-        ReadInt(L"Controller", L"RepeatWindowMs", config.nativeRepeatWindowMs, path),
+        ReadInt(L"General", L"RepeatWindowMs",
+                ReadInt(L"Controller", L"RepeatWindowMs",
+                        config.nativeRepeatWindowMs, path), path),
         100, 2000);
     config.nativeProbe = ReadBool(L"QuickGadgets", L"NativeProbe", config.nativeProbe, path);
     config.nativeProbeLevel = std::clamp(ReadInt(L"QuickGadgets", L"NativeProbeLevel",
                                                  config.nativeProbeLevel, path), 1, 5);
-    config.enabled = ReadBool(L"QuickGadgets", L"Enabled", config.enabled, path);
+    config.enabled = ReadBool(
+        L"General", L"Enabled",
+        ReadBool(L"QuickGadgets", L"Enabled", config.enabled, path), path);
     for (int i = 0; i < kGadgetCount; ++i) {
         const std::wstring name = L"Slot" + std::to_wstring(i + 1);
         config.slotKeys[i] = static_cast<WORD>(ReadInt(L"QuickGadgets", name.c_str(), config.slotKeys[i], path));
@@ -1487,11 +1524,7 @@ void Worker() {
                 } else {
                     Log("One or more native UseGadget query hooks are unavailable");
                 }
-                if (InstallGameplayActionReaderHook()) {
-                    Log("Native four-state UseGadget tracer armed");
-                } else {
-                    Log("Native four-state UseGadget tracer unavailable");
-                }
+
             }
         }
     }
@@ -1522,7 +1555,6 @@ void Worker() {
     bool l1UsedAsModifier = false;
     ULONGLONG l1PressedAt = 0;
     bool shortcutModifierHeld = false;
-    unsigned seenGameplayActionTrace = 0;
 
     while (g_running) {
         if (g_nativeRestorePending.load() &&
@@ -1557,19 +1589,6 @@ void Worker() {
             } else {
                 Log("Native gadget-use state window expired before gameplay consumed it");
             }
-        }
-        const unsigned gameplayActionTrace =
-            g_gameplayActionTraceSequence.load();
-        if (gameplayActionTrace != seenGameplayActionTrace) {
-            seenGameplayActionTrace = gameplayActionTrace;
-            const std::uint32_t bits = g_gameplayActionTraceBits.load();
-            char line[160]{};
-            std::snprintf(line, sizeof(line),
-                          "TRACE genuine UseGadget state #%u bytes=%02X/%02X/%02X/%02X",
-                          gameplayActionTrace,
-                          bits & 0xFF, (bits >> 8) & 0xFF,
-                          (bits >> 16) & 0xFF, (bits >> 24) & 0xFF);
-            Log(line);
         }
 
         Config config;

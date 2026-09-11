@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(QuickGadgets VERSION 0.1.0 LANGUAGES CXX)
+project(QuickGadgets VERSION 1.0.0 LANGUAGES CXX)
 
 add_library(QuickGadgets SHARED src/QuickGadgets.cpp)
 target_compile_features(QuickGadgets PRIVATE cxx_std_20)
@@ -29,5 +29,5 @@ add_custom_target(package
         -DSCRIPT_VERSION=${PROJECT_VERSION}
         -P ${CMAKE_SOURCE_DIR}/cmake/PackageScript.cmake
     DEPENDS QuickGadgets QuickGadgetsBootstrap
-    COMMENT "Creating QuickGadgets.script"
+    COMMENT "Creating versioned QuickGadgets package"
 )

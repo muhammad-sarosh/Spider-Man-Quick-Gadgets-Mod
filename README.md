@@ -1,35 +1,21 @@
-# Quick Gadgets for Marvel's Spider-Man Remastered
+# Quick Gadgets
 
-Quick Gadgets is an experimental Spider-Man 2-style direct-gadget mod for
-Marvel's Spider-Man Remastered 4.0630.0.0. It finds the live
-HeroWeaponManager, resolves the weapon ID in the requested wheel slot, calls
-the game's own selection routine, and can pulse the native UseGadget action.
-The native controller route does not synthesize keyboard input.
+Quick Gadgets adds fast, Spider-Man 2-inspired gadget shortcuts to **Marvel's Spider-Man Remastered**. A shortcut selects and fires its assigned gadget, allows repeat shots for a short window, and then returns to Web Shooter.
 
-The old keyboard-wheel implementation is retained only as an opt-in diagnostic
-fallback. It sends synthetic `[`, `]`, and `E` keystrokes, is focus-sensitive,
-and is disabled by default because it is not suitable for controller play.
+Created by **Sticky Sushi**.
 
-## Current controls
+## Compatibility
 
-| Shortcut | Gadget |
-| --- | --- |
-| `Alt + 1` | Web Shooter |
-| `Alt + 2` | Impact Web |
-| `Alt + 3` | Spider Drone |
-| `Alt + 4` | Electric Web |
-| `Alt + 5` | Web Bomb |
-| `Alt + 6` | Trip Mine |
-| `Alt + 7` | Concussive Blast |
-| `Alt + 8` | Suspension Matrix |
+- Steam version of Marvel's Spider-Man Remastered, executable version **4.0630.0.0**
+- Controller only; keyboard and mouse are not currently supported
+- XInput controller required
+  - Xbox controllers work directly
+  - For other controllers, enable Steam Input or use DS4Windows to provide XInput
+- The in-game **Gadget Select Button** setting must be **Hold R1**
 
-Alt + 1 through Alt + 8 use the native selector and native fire pulse when
-NativeDirectSelect and NativeDirectFire are enabled. These are physical test
-triggers only; the mod does not send those keys to the game.
+The game continued to process its normal face-button actions when they were used in shortcuts. To avoid attacking, dodging, or jumping while firing a gadget, Quick Gadgets uses L1/L2 and D-pad combinations instead of Spider-Man 2's R1 + face-button layout.
 
-On an XInput-compatible controller, leave the game's Gadget Select Button on
-**Hold R1**. The native shortcut layout avoids face buttons so gadget use does
-not also trigger Attack, Dodge, Jump, or Web Strike:
+## Default controls
 
 | Shortcut | Gadget |
 | --- | --- |
@@ -41,95 +27,68 @@ not also trigger Attack, Dodge, Jump, or Web Strike:
 | L2 + D-pad Left | Trip Mine |
 | L2 + D-pad Right | Suspension Matrix |
 
-After a shortcut fires, its gadget remains active for the configurable
-450-millisecond repeat window. Pressing any shortcut again resets the timer;
-repeating the same shortcut fires without another equipment transition.
-Holding L1 or L2 pauses restoration. When the window expires, the mod restores
-Web Shooter without firing it.
+After firing, the selected gadget stays active for 450 milliseconds so the shortcut can be pressed again for repeat shots. Using another shortcut resets that timer, and holding L1 or L2 pauses it. When the timer ends, the mod always returns to Web Shooter—not the gadget that was selected before the shortcut. This is why Web Shooter has no shortcut by default.
 
-F10 enables or disables the mod.
+Locked gadgets remain unavailable until they are unlocked normally in the game.
 
-## Install
+## Installation
 
-1. Install the current community **Spider-Man PC Script Hook** for the exact
-   version of your game.
-2. Build the package CMake target. Copy QuickGadgets.script and
-   QuickGadgets.ini into the game's scripts folder.
-3. Launch the game through the Script Hook/community loader.
+1. Download and extract [Spider-Man PC Script Hook v1.0.2](https://www.nexusmods.com/marvelsspidermanremastered/mods/1288) into the game folder beside `Spider-Man.exe`.
+2. Download the [Script Hook compatibility patch for game version 4.0630.0.0](https://www.nexusmods.com/marvelsspidermanremastered/mods/6167) and extract it into the same folder, replacing files when asked.
+3. Download and extract [Overstrike 1.8.1](https://github.com/Tkachov/Overstrike/releases) outside the game folder, then create a Marvel's Spider-Man Remastered profile.
+4. Download the [MSMR Overstrike Script Proxy Fix v1.0.1](https://github.com/saltyboosack-blip/MSMR-Overstrike-Script-Proxy-Fix/releases/tag/v1.0.1). Close the game and Overstrike, run `1_INSTALL_PROXY_FIX.cmd`, and select the `Overstrike.exe` you use.
+5. Add `QuickGadgets-v1.0.0.script` to Overstrike and enable it.
+6. In Overstrike's `.script` settings, enable both **Enable .script support** and **Add '-scripts' to commandline.txt**.
+7. In the game's controller settings, set **Gadget Select Button** to **Hold R1**.
+8. Click **Install Mods**, close Overstrike, and launch the game normally through Steam. Do not run `SMPCScriptHookLauncher.exe`.
 
-During development, fully close the game before replacing QuickGadgets.script.
-Script Hook documents Insert as an unload/reload command, but does not expose a
-documented script shutdown callback; this mod owns a polling worker, so process
-restart is the safe way to load a newly compiled DLL.
+After installation, normal launches only require pressing Play in Steam. Use Overstrike again when installing, updating, disabling, or removing mods.
 
-Only the optional KeyboardWheelFallback needs the game's Previous Gadget,
-Next Gadget, and Use Gadget keyboard bindings. Leave that fallback disabled
-for native/controller use.
+## Configuration
 
-The development build can run a read-only native probe after attach. Once a
-save is loaded, findings are written to QuickGadgets.log beside the DLL. The
-probe is opt-in:
-NativeProbe=1 is required, because some Script Hook builds can crash while
-enumerating components. Leave it at 0 for normal play. When diagnosing, set
-NativeProbeLevel from 1 through 5 to add one operation at a time: hero pointer,
-component count, component names, vtable reads, then named component lookups.
+Edit `scripts/QuickGadgets.ini` inside the game folder while the game is closed. Each entry in `[ControllerBindings]` directly names the gadget assigned to that shortcut.
 
-## Configure
+Accepted names are:
 
-Edit `QuickGadgets.ini` beside the script before launching the game. Values are
-Windows virtual-key codes; common examples are `18` for Alt, `16` for Shift,
-`17` for Ctrl, and `49` through `56` for `1` through `8`.
-
-KeyboardWheelFallback=0 is the default and is the correct setting for the
-native/controller route. Set it to 1 only for the legacy keyboard test.
-NativeDirectFire=0 keeps native selection but disables the experimental fire
-pulse, which is useful for isolating a problem.
-
-The wheel order is the default Remastered order. If a mod changes that order,
-reassign the `Slot1`...`Slot8` key values to match its actual order.
-
-When enabled, the legacy fallback anchors the game to the first wheel slot by
-sending several Previous Gadget pulses, then advances to the requested gadget
-and fires it. This path is intentionally stateless but remains keyboard-only.
-
-RestoreWebShooter applies to the legacy wheel fallback. Native controller
-restoration is controlled separately by AutoRestoreWebShooter and
-RepeatWindowMs in the Controller section.
-
-## Offline layout verification
-
-Before installing a build, verify that the installed executable still matches
-the exact 4.0630.0.0 native layout this mod targets:
-
-```powershell
-python tools/verify_game_layout.py `
-  "S:\Steam\steamapps\common\Marvel's Spider-Man Remastered\Spider-Man.exe"
+```text
+WebShooter
+ImpactWeb
+SpiderDrone
+ElectricWeb
+WebBomb
+TripMine
+ConcussiveBlast
+SuspensionMatrix
+None
 ```
 
-The verifier checks the executable hash, all called function signatures,
-HeroWeaponManager vtable entries, and the embedded input-action names/hashes.
-Technical evidence and current limitations are recorded in
-`docs/REVERSE_ENGINEERING.md`.
+Use `None` to disable a shortcut. Restart the game after making changes. F10 temporarily enables or disables Quick Gadgets during gameplay.
 
-The native controller path uses D-pad shortcuts rather than face buttons, so it
-does not need to suppress Attack, Dodge, Jump, or Web Strike and does not remap
-the controller through Steam Input.
+`AutoRestoreWebShooter=1` enables the automatic return to Web Shooter. `RepeatWindowMs` controls how long the selected gadget remains active after firing.
 
-## Build
+## Troubleshooting
 
-Requires Visual Studio 2022 Build Tools with the Desktop C++ workload and CMake.
+- Nothing happens: verify the game is version 4.0630.0.0, both Script Hook downloads were installed in order, Quick Gadgets is enabled in Overstrike, and Overstrike's two `.script` options are enabled.
+- Script Hook itself does not load: install the [Microsoft Visual C++ Redistributable x64](https://aka.ms/vs/17/release/vc_redist.x64.exe) and the [DirectX SDK (June 2010)](https://www.microsoft.com/en-us/download/details.aspx?id=6812), which are listed by Script Hook as requirements.
+- Wrong controller detected: change `Index=-1` to `0`, `1`, `2`, or `3`.
+- PlayStation or other non-XInput controller: enable Steam Input or DS4Windows.
+- An unlocked gadget does not fire: check `QuickGadgets.log` and `QuickGadgets.bootstrap.log` in the game's `scripts` folder.
+- Overstrike removed the `scripts` folder: add/enable Quick Gadgets again and click **Install Mods**.
+
+## Building from source
+
+Requires Visual Studio 2022 with Desktop development with C++ and CMake.
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release --target package
 ```
 
-The package is written to `build/package/QuickGadgets.script`.
+Technical reverse-engineering notes are in [`docs/REVERSE_ENGINEERING.md`](docs/REVERSE_ENGINEERING.md).
 
-## Validation plan
+## Credits
 
-Start with an unlocked slot and verify selection, firing, repeated firing
-within the repeat window, and automatic restoration to Web Shooter. If the game
-crashes or only selection works, set NativeDirectFire=0 and repeat. Finally,
-manually change the wheel selection and repeat; the native route addresses
-slots directly and should not depend on current wheel state.
+- jedijosh920 for Spider-Man PC Script Hook
+- idntknw and popitex104 for the 4.0630.0.0 Script Hook compatibility patch
+- Tkachov and contributors for Overstrike
+- saltyboosack-blip for the MSMR Overstrike Script Proxy Fix

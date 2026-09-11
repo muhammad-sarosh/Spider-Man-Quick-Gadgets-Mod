@@ -16,7 +16,7 @@ file(COPY "${SOURCE_DIR}/QuickGadgets.ini" DESTINATION "${STAGING_DIR}")
 file(WRITE "${STAGING_DIR}/info.json" "{\n
   \"name\": \"Quick Gadgets\",\n
   \"type\": \"script\",\n
-  \"author\": \"Quick Gadgets contributors\",\n
+  \"author\": \"Sticky Sushi\",\n
   \"version\": \"${SCRIPT_VERSION}\",\n
   \"dependencies\": [],\n
   \"game\": \"MSMR\",\n
@@ -33,5 +33,7 @@ execute_process(
 if(NOT PACKAGE_RESULT EQUAL 0)
     message(FATAL_ERROR "Could not create script archive.")
 endif()
-file(RENAME "${OUTPUT_DIR}/QuickGadgets.zip" "${OUTPUT_DIR}/QuickGadgets.script")
+file(REMOVE "${OUTPUT_DIR}/QuickGadgets.script")
+file(REMOVE "${OUTPUT_DIR}/QuickGadgets-v${SCRIPT_VERSION}.script")
+file(RENAME "${OUTPUT_DIR}/QuickGadgets.zip" "${OUTPUT_DIR}/QuickGadgets-v${SCRIPT_VERSION}.script")
 file(REMOVE_RECURSE "${STAGING_DIR}")
