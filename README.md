@@ -4,6 +4,8 @@ Quick Gadgets adds fast, Spider-Man 2-inspired gadget shortcuts to **Marvel's Sp
 
 Created by **Sticky Sushi**.
 
+![Quick Gadgets controller shortcuts](assets/controller-mappings.png)
+
 ## Compatibility
 
 - Steam version of Marvel's Spider-Man Remastered, executable version **4.0630.0.0**
