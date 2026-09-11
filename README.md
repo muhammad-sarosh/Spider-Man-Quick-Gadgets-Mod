@@ -12,7 +12,8 @@ Created by **Sticky Sushi**.
 - Controller only; keyboard and mouse are not currently supported
 - XInput controller required
   - Xbox controllers work directly
-  - For other controllers, enable Steam Input or use DS4Windows to provide XInput
+  - For PlayStation and other non-XInput controllers, try Steam Input first
+  - If the shortcuts do not respond through Steam Input, disable it for the game and use DS4Windows in Xbox 360 emulation mode
 - The in-game **Gadget Select Button** setting must be **Hold R1**
 
 The game continued to process its normal face-button actions when they were used in shortcuts. To avoid attacking, dodging, or jumping while firing a gadget, Quick Gadgets uses L1/L2 and D-pad combinations instead of Spider-Man 2's R1 + face-button layout.
@@ -73,7 +74,7 @@ Use `None` to disable a shortcut. Restart the game after making changes. F10 tem
 - Nothing happens: verify the game is version 4.0630.0.0, both Script Hook downloads were installed in order, Quick Gadgets is enabled in Overstrike, and Overstrike's two `.script` options are enabled.
 - Script Hook itself does not load: install the [Microsoft Visual C++ Redistributable x64](https://aka.ms/vs/17/release/vc_redist.x64.exe) and the [DirectX SDK (June 2010)](https://www.microsoft.com/en-us/download/details.aspx?id=6812), which are listed by Script Hook as requirements.
 - Wrong controller detected: change `Index=-1` to `0`, `1`, `2`, or `3`.
-- PlayStation or other non-XInput controller: enable Steam Input or DS4Windows.
+- PlayStation or other non-XInput controller: try Steam Input first. If the game recognizes the controller but Quick Gadgets does not, disable Steam Input for the game and use DS4Windows in Xbox 360 emulation mode.
 - An unlocked gadget does not fire: check `QuickGadgets.log` and `QuickGadgets.bootstrap.log` in the game's `scripts` folder.
 - Overstrike removed the `scripts` folder: add/enable Quick Gadgets again and click **Install Mods**.
 
