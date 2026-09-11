@@ -859,20 +859,20 @@ const char* ResolveWeaponAssetName(std::uintptr_t inventoryEntry) {
 
 std::uint32_t FindGadgetWeaponId(void* manager, int slot, const char** matchedName) {
     if (!manager || slot < 0 || slot >= kGadgetCount) return 0;
-    constexpr std::array<std::array<const char*, 3>, kGadgetCount> kNames{{
+    constexpr std::array<std::array<const char*, 4>, kGadgetCount> kNames{{
         // The player-facing Web Shooter gadget is named ImpactWeb internally.
         // The separate WebShooter asset is the unlimited basic web attack; it
         // has no gadget ammo and produces a stale zero/red HUD if equipped as
         // the wheel gadget.
-        {{"ImpactWeb", nullptr, nullptr}},
+        {{"ImpactWeb", nullptr, nullptr, nullptr}},
         // The player-facing Impact Web wheel entry is named WebBlast.
-        {{"WebBlast", nullptr, nullptr}},
-        {{"SpiderDrone", nullptr, nullptr}},
-        {{"ElectricWeb", nullptr, nullptr}},
-        {{"WebBomb", nullptr, nullptr}},
-        {{"TripMine", "WebTripMine", "GadgetTripmine"}},
-        {{"ShockerBlast", "ConcussiveBlast", "GadgetBlast"}},
-        {{"AirLauncher", "SuspensionMatrix", "GadgetMatrix"}},
+        {{"WebBlast", nullptr, nullptr, nullptr}},
+        {{"SpiderDrone", nullptr, nullptr, nullptr}},
+        {{"ElectricWeb", nullptr, nullptr, nullptr}},
+        {{"WebBomb", nullptr, nullptr, nullptr}},
+        {{"ProximityMine", "TripMineAttach", "TripMine", "GadgetTripmine"}},
+        {{"ShockerBlast", "ConcussiveBlast", "GadgetBlast", nullptr}},
+        {{"AirLauncher", "SuspensionMatrix", "GadgetMatrix", nullptr}},
     }};
 
     const auto base = reinterpret_cast<std::uintptr_t>(manager);
