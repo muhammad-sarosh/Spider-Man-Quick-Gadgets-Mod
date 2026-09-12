@@ -1394,6 +1394,10 @@ constexpr const wchar_t* kGadgetConfigNames[kGadgetCount] = {
     L"WebBomb", L"TripMine", L"ConcussiveBlast", L"SuspensionMatrix",
 };
 
+constexpr const wchar_t* kDefaultKeyboardKeyNames[kGadgetCount] = {
+    L"None", L"F1", L"F4", L"F3", L"F2", L"F6", L"F5", L"F7",
+};
+
 int ReadControllerBinding(const wchar_t* key, int fallback,
                           const std::wstring& path) {
     wchar_t value[64]{};
@@ -1486,10 +1490,9 @@ Config LoadConfig() {
     std::array<bool, 256> assigned{};
     for (int slot = 0; slot < kGadgetCount; ++slot) {
         wchar_t value[64]{};
-        const std::wstring fallback = config.keyboardKeys[slot] == 0
-            ? L"None" : L"F" + std::to_wstring(config.keyboardKeys[slot] - VK_F1 + 1);
-        GetPrivateProfileStringW(L"Keyboard", kGadgetConfigNames[slot], fallback.c_str(),
-            value, static_cast<DWORD>(std::size(value)), path.c_str());
+        GetPrivateProfileStringW(L"KeyboardBindings", kGadgetConfigNames[slot],
+            kDefaultKeyboardKeyNames[slot], value,
+            static_cast<DWORD>(std::size(value)), path.c_str());
         const auto parsed = quickgadgets::ParseKeyboardKey(value);
         if (!parsed || (*parsed != 0 &&
             (*parsed == config.toggleKey || *parsed == VK_INSERT || assigned[*parsed]))) {
@@ -1606,7 +1609,7 @@ void Worker() {
     quickgadgets::KeyboardTapMode keyboardTapMode;
     Log(g_config.keyboardEnabled
         ? "Experimental native keyboard shortcuts enabled (no keyboard simulation)"
-        : "Native keyboard shortcuts disabled; set [Keyboard] Enabled=1 to test");
+        : "Native keyboard shortcuts disabled in QuickGadgets.ini");
 
     while (g_running) {
         if (g_nativeRestorePending.load() &&

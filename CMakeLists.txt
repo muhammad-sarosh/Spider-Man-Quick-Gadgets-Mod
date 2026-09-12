@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(QuickGadgets VERSION 1.0.0 LANGUAGES CXX)
+project(QuickGadgets VERSION 1.1.0 LANGUAGES CXX)
 include(CTest)
 if(BUILD_TESTING)
     add_executable(KeyboardBindingsTests tests/KeyboardBindingsTests.cpp)

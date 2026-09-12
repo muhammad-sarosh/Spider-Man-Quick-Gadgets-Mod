@@ -10,6 +10,7 @@ int main() {
     check(ParseKeyboardKey(L"F24") == 0x87, "F24");
     check(ParseKeyboardKey(L"a") == 0x41, "letter");
     check(ParseKeyboardKey(L"2") == 0x32, "number row");
+    check(ParseKeyboardKey(L"0") == 0x30, "number-row zero");
     check(ParseKeyboardKey(L"Numpad2") == 0x62, "numpad");
     check(ParseKeyboardKey(L"Mouse4") == 0x05, "mouse side button");
     check(ParseKeyboardKey(L"LShift") == 0xA0, "left shift");
