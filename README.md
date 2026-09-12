@@ -9,7 +9,7 @@ Created by **Sticky Sushi**.
 ## Compatibility
 
 - Steam version of Marvel's Spider-Man Remastered, executable version **4.0630.0.0**
-- Keyboard and mouse supported without XInput
+- Keyboard and mouse supported
 - Controller support requires XInput
   - Xbox controllers work directly
   - For PlayStation and other non-XInput controllers, try Steam Input first
