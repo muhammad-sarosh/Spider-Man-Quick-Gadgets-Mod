@@ -80,6 +80,10 @@ Use `None` to disable a shortcut. Restart the game after making changes. F10 tem
 
 ## Building from source
 
+Development builds include opt-in experimental keyboard shortcuts, disabled by
+default. See [keyboard testing instructions](docs/KEYBOARD_TESTING.md). The public
+release remains controller-only until native keyboard/mouse firing is validated.
+
 Requires Visual Studio 2022 with Desktop development with C++ and CMake.
 
 ```powershell

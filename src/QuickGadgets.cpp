@@ -1,4 +1,5 @@
 #include <Windows.h>
+#include "KeyboardBindings.h"
 
 #include <algorithm>
 #include <array>
@@ -51,6 +52,10 @@ struct Config {
     bool nativeDirectSelect = true;
     bool nativeDirectFire = true;
     bool controllerEnabled = true;
+    bool keyboardEnabled = false;
+    std::array<WORD, kGadgetCount> keyboardKeys{
+        0, VK_F1, VK_F4, VK_F3, VK_F2, VK_F6, VK_F5, VK_F7
+    };
     int controllerIndex = -1;
     int controllerL1TapSlot = ImpactWeb;
     int controllerDpadLeftSlot = WebBomb;
@@ -235,6 +240,7 @@ constexpr int kNativeRequestSlotMask = 0xFF;
 constexpr int kNativeRequestFire = 0x100;
 constexpr int kNativeRequestSuppressFaces = 0x200;
 constexpr int kNativeRequestFinalizeWheelState = 0x400;
+constexpr int kNativeRequestKeyboard = 0x800;
 std::atomic_int g_pendingNativeRequest = kNoNativeRequest;
 std::atomic_bool g_controllerComboHeld = false;
 std::atomic_bool g_controllerModifierHeld = false;
@@ -254,6 +260,7 @@ std::atomic_bool g_forceUseGadgetDelivered = false;
 std::atomic_ullong g_forceUseGadgetDeadline = 0;
 std::atomic<void*> g_forceUseGadgetContext = nullptr;
 std::atomic_bool g_delayedNativeFirePending = false;
+std::atomic_bool g_delayedNativeFireFromKeyboard = false;
 std::atomic_ullong g_delayedNativeFireAt = 0;
 std::atomic_bool g_nativeAutoRestoreEnabled = true;
 std::atomic_uint g_nativeRepeatWindowMs = 450;
@@ -934,8 +941,19 @@ void SuppressFaceActions(void* inputContext) {
 
 void* FindHeroWeaponManager(void* hero);
 
+bool IsGameForeground() {
+    DWORD foregroundProcess = 0;
+    const HWND foreground = GetForegroundWindow();
+    return foreground && GetWindowThreadProcessId(foreground, &foregroundProcess) &&
+        foregroundProcess == GetCurrentProcessId();
+}
+
 void ArmNativeFireOnGameThread() {
     if (!g_running || !g_native.getPlayerHero) return;
+    if (g_delayedNativeFireFromKeyboard.load() && (!g_enabled || !IsGameForeground())) {
+        Log("Keyboard fire cancelled: game lost focus or mod was disabled");
+        return;
+    }
     void* manager = FindHeroWeaponManager(g_native.getPlayerHero());
     void* inputContext = ResolveInputContext(manager);
     if (!inputContext) {
@@ -1068,6 +1086,8 @@ void SelectNativeSlotOnGameThread() {
     const bool suppressFaces = (request & kNativeRequestSuppressFaces) != 0;
     const bool finalizeWheelState =
         (request & kNativeRequestFinalizeWheelState) != 0;
+    const bool fromKeyboard = (request & kNativeRequestKeyboard) != 0;
+    if (fromKeyboard && (!g_enabled || !IsGameForeground())) return;
     if (slot < 0 || slot >= kGadgetCount || !g_native.getPlayerHero) return;
 
     void* manager = FindHeroWeaponManager(g_native.getPlayerHero());
@@ -1143,6 +1163,7 @@ void SelectNativeSlotOnGameThread() {
                 // game process several frames before exposing the synthetic
                 // press, otherwise the fire handler still owns Web Shooter.
                 g_delayedNativeFireAt = GetTickCount64() + 75;
+                g_delayedNativeFireFromKeyboard = fromKeyboard;
                 g_delayedNativeFirePending = true;
                 if (slot != WebShooter && g_nativeAutoRestoreEnabled.load()) {
                     // Keep the selected gadget live briefly so repeated shortcut
@@ -1184,13 +1205,14 @@ void SuppressControllerComboOnGameThread() {
 }
 
 bool QueueNativeSlot(int slot, bool fire, bool suppressFaces,
-                     bool finalizeWheelState = false) {
+                     bool finalizeWheelState = false, bool fromKeyboard = false) {
     if (!g_native.gameMainThreadCall || slot < 0 || slot >= kGadgetCount) return false;
 
     const int request = slot |
         (fire ? kNativeRequestFire : 0) |
         (suppressFaces ? kNativeRequestSuppressFaces : 0) |
-        (finalizeWheelState ? kNativeRequestFinalizeWheelState : 0);
+        (finalizeWheelState ? kNativeRequestFinalizeWheelState : 0) |
+        (fromKeyboard ? kNativeRequestKeyboard : 0);
     int expected = kNoNativeRequest;
     if (!g_pendingNativeRequest.compare_exchange_strong(expected, request)) return false;
 
@@ -1454,6 +1476,25 @@ Config LoadConfig() {
         const std::wstring name = L"Slot" + std::to_wstring(i + 1);
         config.slotKeys[i] = static_cast<WORD>(ReadInt(L"QuickGadgets", name.c_str(), config.slotKeys[i], path));
     }
+    config.keyboardEnabled = ReadBool(L"Keyboard", L"Enabled", false, path);
+    std::array<bool, 256> assigned{};
+    for (int slot = 0; slot < kGadgetCount; ++slot) {
+        wchar_t value[64]{};
+        const std::wstring fallback = config.keyboardKeys[slot] == 0
+            ? L"None" : L"F" + std::to_wstring(config.keyboardKeys[slot] - VK_F1 + 1);
+        GetPrivateProfileStringW(L"Keyboard", kGadgetConfigNames[slot], fallback.c_str(),
+            value, static_cast<DWORD>(std::size(value)), path.c_str());
+        const auto parsed = quickgadgets::ParseKeyboardKey(value);
+        if (!parsed || (*parsed != 0 &&
+            (*parsed == config.toggleKey || *parsed == VK_INSERT || assigned[*parsed]))) {
+            config.keyboardKeys[slot] = 0;
+            Log("Invalid, duplicate, or reserved keyboard binding for gadget slot " +
+                std::to_string(slot + 1) + "; shortcut disabled");
+        } else {
+            config.keyboardKeys[slot] = *parsed;
+            if (*parsed) assigned[*parsed] = true;
+        }
+    }
     return config;
 }
 
@@ -1555,6 +1596,10 @@ void Worker() {
     bool l1UsedAsModifier = false;
     ULONGLONG l1PressedAt = 0;
     bool shortcutModifierHeld = false;
+    quickgadgets::KeyboardEdges keyboardEdges;
+    Log(g_config.keyboardEnabled
+        ? "Experimental native keyboard shortcuts enabled (no keyboard simulation)"
+        : "Native keyboard shortcuts disabled; set [Keyboard] Enabled=1 to test");
 
     while (g_running) {
         if (g_nativeRestorePending.load() &&
@@ -1602,8 +1647,23 @@ void Worker() {
             Log(g_enabled ? "Quick Gadgets: enabled" : "Quick Gadgets: disabled");
         }
 
+        std::array<bool, kGadgetCount> keyboardDown{};
+        for (int slot = 0; slot < kGadgetCount; ++slot) {
+            keyboardDown[slot] = config.keyboardKeys[slot] != 0 && Down(config.keyboardKeys[slot]);
+        }
+        const int keyboardSlot = keyboardEdges.Poll(keyboardDown,
+            nativeDirectSelect && g_enabled && config.keyboardEnabled &&
+            !config.keyboardWheelFallback && IsGameForeground());
+        if (keyboardSlot >= 0) {
+            if (QueueNativeSlot(keyboardSlot, config.nativeDirectFire, false, false, true)) {
+                Log("Native keyboard shortcut queued for gadget slot " + std::to_string(keyboardSlot + 1));
+            } else {
+                Log("Native keyboard shortcut skipped: another equipment request is pending");
+            }
+        }
+
         if (nativeDirectSelect && g_enabled) {
-            // Keyboard shortcuts are part of the legacy fallback only. Steam
+            // Old Alt+number triggers are part of the legacy fallback only. Steam
             // Input/controller profiles can expose a gamepad chord as Alt+1;
             // accepting that alongside native XInput queued WebShooter after
             // ImpactWeb and replaced the selected gadget before the gameplay
