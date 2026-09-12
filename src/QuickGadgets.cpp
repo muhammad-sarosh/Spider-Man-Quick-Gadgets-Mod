@@ -53,6 +53,8 @@ struct Config {
     bool nativeDirectFire = true;
     bool controllerEnabled = true;
     bool keyboardEnabled = false;
+    bool keyboardSingleSelectDoubleFire = false;
+    int keyboardDoubleTapWindowMs = 350;
     std::array<WORD, kGadgetCount> keyboardKeys{
         0, VK_F1, VK_F4, VK_F3, VK_F2, VK_F6, VK_F5, VK_F7
     };
@@ -1477,6 +1479,10 @@ Config LoadConfig() {
         config.slotKeys[i] = static_cast<WORD>(ReadInt(L"QuickGadgets", name.c_str(), config.slotKeys[i], path));
     }
     config.keyboardEnabled = ReadBool(L"Keyboard", L"Enabled", false, path);
+    config.keyboardSingleSelectDoubleFire = ReadBool(
+        L"Keyboard", L"SingleTapSelectDoubleTapFire", false, path);
+    config.keyboardDoubleTapWindowMs = std::clamp(ReadInt(
+        L"Keyboard", L"DoubleTapWindowMs", 350, path), 150, 1000);
     std::array<bool, 256> assigned{};
     for (int slot = 0; slot < kGadgetCount; ++slot) {
         wchar_t value[64]{};
@@ -1597,6 +1603,7 @@ void Worker() {
     ULONGLONG l1PressedAt = 0;
     bool shortcutModifierHeld = false;
     quickgadgets::KeyboardEdges keyboardEdges;
+    quickgadgets::KeyboardTapMode keyboardTapMode;
     Log(g_config.keyboardEnabled
         ? "Experimental native keyboard shortcuts enabled (no keyboard simulation)"
         : "Native keyboard shortcuts disabled; set [Keyboard] Enabled=1 to test");
@@ -1644,6 +1651,7 @@ void Worker() {
 
         if (Pressed(config.toggleKey)) {
             g_enabled = !g_enabled;
+            keyboardTapMode.Reset();
             Log(g_enabled ? "Quick Gadgets: enabled" : "Quick Gadgets: disabled");
         }
 
@@ -1655,8 +1663,16 @@ void Worker() {
             nativeDirectSelect && g_enabled && config.keyboardEnabled &&
             !config.keyboardWheelFallback && IsGameForeground());
         if (keyboardSlot >= 0) {
-            if (QueueNativeSlot(keyboardSlot, config.nativeDirectFire, false, false, true)) {
-                Log("Native keyboard shortcut queued for gadget slot " + std::to_string(keyboardSlot + 1));
+            const ULONGLONG now = GetTickCount64();
+            const bool fire = config.nativeDirectFire && keyboardTapMode.ShouldFire(
+                keyboardSlot, now, config.keyboardSingleSelectDoubleFire,
+                static_cast<ULONGLONG>(config.keyboardDoubleTapWindowMs));
+            if (QueueNativeSlot(keyboardSlot, fire, false, false, true)) {
+                keyboardTapMode.Commit(keyboardSlot, now,
+                    config.keyboardSingleSelectDoubleFire, fire);
+                Log("Native keyboard shortcut queued to " +
+                    std::string(fire ? "fire" : "select") + " gadget slot " +
+                    std::to_string(keyboardSlot + 1));
             } else {
                 Log("Native keyboard shortcut skipped: another equipment request is pending");
             }

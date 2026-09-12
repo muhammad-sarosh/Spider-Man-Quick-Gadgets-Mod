@@ -34,3 +34,10 @@ in menus. Do not publish this as fully supported keyboard functionality yet.
 
 If it selects but does not fire, provide scripts/QuickGadgets.log. The key press
 is logged separately from the native equipment transition and fire operation.
+
+## Select/double-fire mode
+
+Set `SingleTapSelectDoubleTapFire=1`. One tap should select the gadget without
+firing or scheduling automatic restoration. A second tap of the same key inside
+`DoubleTapWindowMs` should fire it and start the normal repeat/restore timer.
+A late second tap or a tap on another gadget should only make that selection.
