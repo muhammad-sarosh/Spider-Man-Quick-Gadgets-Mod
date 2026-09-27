@@ -18,33 +18,11 @@ Created by **Sticky Sushi**.
 
 The game continued to process its normal face-button actions when they were used in shortcuts. To avoid attacking, dodging, or jumping while firing a gadget, Quick Gadgets uses L1/L2 and D-pad combinations instead of Spider-Man 2's R1 + face-button layout.
 
-## Default controller controls
-
-| Shortcut | Gadget |
-| --- | --- |
-| L1 tap | Impact Web |
-| D-pad Left | Web Bomb |
-| D-pad Right | Electric Web |
-| L1 + D-pad Left | Spider Drone |
-| L1 + D-pad Right | Concussive Blast |
-| L2 + D-pad Left | Trip Mine |
-| L2 + D-pad Right | Suspension Matrix |
+## Shortcut behavior
 
 After firing, the selected gadget stays active for 450 milliseconds so the shortcut can be pressed again for repeat shots. Using another shortcut resets that timer, and holding L1 or L2 pauses it. When the timer ends, the mod always returns to Web Shooter—not the gadget that was selected before the shortcut. This is why Web Shooter has no shortcut by default.
 
 Locked gadgets remain unavailable until they are unlocked normally in the game.
-
-## Default keyboard controls
-
-| Key | Gadget |
-| --- | --- |
-| F1 | Impact Web |
-| F2 | Web Bomb |
-| F3 | Electric Web |
-| F4 | Spider Drone |
-| F5 | Concussive Blast |
-| F6 | Trip Mine |
-| F7 | Suspension Matrix |
 
 Web Shooter is set to `None` because automatic restoration already returns to
 it. Every key can be changed in the INI. Holding a key fires only once; press and
